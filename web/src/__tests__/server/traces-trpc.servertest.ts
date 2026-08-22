@@ -1,5 +1,5 @@
 import type { Session } from "next-auth";
-import { prisma } from "@langfuse/shared/src/db";
+import { prisma, AuditLogRecordType } from "@langfuse/shared/src/db";
 import { appRouter } from "@/src/server/api/root";
 import { createInnerTRPCContext } from "@/src/server/api/trpc";
 import {
@@ -689,6 +689,93 @@ describe("traces trpc", () => {
       expect(traceRes?.projectId).toEqual(projectId);
       expect(traceRes?.name).toEqual(trace.name);
       expect(traceRes?.timestamp).toEqual(new Date(trace.timestamp));
+    });
+  });
+
+  describe("trace-view read audit (real middleware, redis and postgres)", () => {
+    // The other audit tests each stub a layer: the unit test mocks redis, and
+    // trace-view-audit-middleware.servertest.ts mocks recordTraceViewAudit.
+    // This one runs the whole UI path unmocked — real enforceTraceAccess, real
+    // dedup against redis, real row in postgres — because that composition is
+    // what the compliance requirement actually rests on.
+    const auditRowsFor = (traceId: string) =>
+      prisma.auditLog.findMany({
+        where: {
+          projectId,
+          resourceType: "trace",
+          resourceId: traceId,
+          action: "read",
+        },
+      });
+
+    // Written to both tables so the test holds under either v4 write mode:
+    // enforceTraceAccess reads the events table under events_only and the
+    // legacy table otherwise.
+    const seedTrace = async (traceId: string, timestamp: Date) => {
+      await createTracesCh([
+        createTrace({
+          id: traceId,
+          project_id: projectId,
+          timestamp: timestamp.getTime(),
+        }),
+      ]);
+      const spanId = randomUUID();
+      await createEventsCh([
+        createEvent({
+          id: spanId,
+          span_id: spanId,
+          trace_id: traceId,
+          project_id: projectId,
+          parent_span_id: "",
+          start_time: timestamp.getTime() * 1000,
+        }),
+      ]);
+      await waitForExpect(async () => {
+        const [legacy, events] = await Promise.all([
+          getTraceByIdFromTracesTable({ projectId, traceId }),
+          getTraceByIdFromEventsTable({ projectId, traceId }),
+        ]);
+        expect(legacy?.id ?? events?.id).toBe(traceId);
+      });
+    };
+
+    it("writes a user-attributed audit row when the detail view is opened", async () => {
+      const traceId = randomUUID();
+      const timestamp = new Date();
+      await seedTrace(traceId, timestamp);
+
+      await caller.traces.byIdWithObservationsAndScores({
+        projectId,
+        traceId,
+        timestamp,
+      });
+
+      // The write is fire-and-forget, so poll for it.
+      await waitForExpect(async () => {
+        const rows = await auditRowsFor(traceId);
+        expect(rows.length).toBe(1);
+        expect(rows[0]!.type).toBe(AuditLogRecordType.USER);
+        expect(rows[0]!.userId).toBe("user-1");
+        expect(rows[0]!.apiKeyId).toBeNull();
+      });
+    });
+
+    it("dedups a second view of the same trace within the window", async () => {
+      const traceId = randomUUID();
+      const timestamp = new Date();
+      await seedTrace(traceId, timestamp);
+
+      for (let i = 0; i < 2; i++) {
+        await caller.traces.byIdWithObservationsAndScores({
+          projectId,
+          traceId,
+          timestamp,
+        });
+      }
+
+      await waitForExpect(async () => {
+        expect((await auditRowsFor(traceId)).length).toBe(1);
+      });
     });
   });
 
