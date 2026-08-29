@@ -1200,6 +1200,8 @@ jobs:
         run: find .turbo/cache -type f -mtime +3 -delete 2>/dev/null || true
 
   all-ci-passed:
+    env:
+      SLACK_WEBHOOK: ${{ secrets.SLACK_CI_FAILURE_WORKFLOW_WEBHOOK_URL }}
     # This allows us to have a branch protection rule for tests and deploys with matrix
     runs-on: ubuntu-latest
     needs:
@@ -1247,7 +1249,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Notify Slack
-        if: failure() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/v3' || startsWith(github.ref, 'refs/tags/'))
+        if: failure() && env.SLACK_WEBHOOK != '' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/v3' || startsWith(github.ref, 'refs/tags/'))
         uses: ./.github/actions/notify-slack-failure
         with:
           title: "❌ CI Failed"
@@ -1263,7 +1265,6 @@ jobs:
     needs: all-ci-passed
     # if something inside all-ci-passed was skipped, but everything that ran passed, we still want to deploy
     if: always() && needs.all-ci-passed.outputs.success == 'true' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    environment: "protected branches"
     strategy:
       fail-fast: false
       matrix:
@@ -1310,30 +1311,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Log in to Docker Hub
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      # build-push-action v2 requires this step; it no longer sets up buildkit
-      # itself. Both inputs are load-bearing, do not drop them:
-      # - cache-key is required as of setup-docker-builder v2. Without it the
-      #   action errors and falls back to a local builder, which is how the
-      #   v4.2.0 and v4.3.0 releases silently lost their layer cache.
-      # - nofallback makes that degradation fail the job instead of emitting a
-      #   warning nobody reads. Releases are rare and cache-cold builds are
-      #   slow, so a Blacksmith outage should block the release, not hide in it.
-      - name: Setup Blacksmith Builder
-        uses: useblacksmith/setup-docker-builder@1e75355f81cbb3f93cba1eb5dd5e5b05110ca8f9 # v2.0.1
-        with:
-          cache-key: langfuse/${{ matrix.image_name }}-${{ matrix.platform_tag }}
-          nofallback: "true"
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - name: Extract metadata (labels) for Docker
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: |
-            ghcr.io/langfuse/${{ matrix.image_name }}
+            ghcr.io/placer-labs/${{ matrix.image_name }}
             langfuse/${{ matrix.image_name }}
           flavor: |
             latest=false
@@ -1344,25 +1329,13 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref, '-rc') }}
             type=semver,pattern={{major}},enable=${{ !contains(github.ref, '-rc') }}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v4') && !contains(github.ref, '-rc') }}
       - name: Build and push image by digest to GitHub Container Registry (${{ matrix.component }}, ${{ matrix.platform_tag }})
         id: build-ghcr
-        uses: useblacksmith/build-push-action@fb9e3e6a9299c78462bfadd0d93352c316adc9b8 # v2.2.0
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           context: .
           file: ${{ matrix.dockerfile }}
-          outputs: type=image,name=ghcr.io/langfuse/${{ matrix.image_name }},push-by-digest=true,name-canonical=true,push=true
-          labels: ${{ steps.meta.outputs.labels }}
-          platforms: ${{ matrix.platform }}
-          provenance: false
-          sbom: false
-      - name: Build and push image by digest to Docker Hub (${{ matrix.component }}, ${{ matrix.platform_tag }})
-        id: build-dockerhub
-        uses: useblacksmith/build-push-action@fb9e3e6a9299c78462bfadd0d93352c316adc9b8 # v2.2.0
-        with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          outputs: type=image,name=langfuse/${{ matrix.image_name }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=ghcr.io/placer-labs/${{ matrix.image_name }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
           platforms: ${{ matrix.platform }}
           provenance: false
@@ -1370,31 +1343,26 @@ jobs:
       - name: Record pushed digests
         env:
           DIGEST_GHCR: ${{ steps.build-ghcr.outputs.digest }}
-          DIGEST_DOCKERHUB: ${{ steps.build-dockerhub.outputs.digest }}
           PLATFORM_TAG: ${{ matrix.platform_tag }}
         run: |
-          if [ -z "$DIGEST_GHCR" ] || [ -z "$DIGEST_DOCKERHUB" ]; then
+          if [ -z "$DIGEST_GHCR" ]; then
             echo "Missing registry digest output"
             exit 1
           fi
 
-          mkdir -p "$RUNNER_TEMP/digests/ghcr" "$RUNNER_TEMP/digests/dockerhub"
+          mkdir -p "$RUNNER_TEMP/digests/ghcr"
           printf '%s\n' "$DIGEST_GHCR" > "$RUNNER_TEMP/digests/ghcr/${PLATFORM_TAG}.txt"
-          printf '%s\n' "$DIGEST_DOCKERHUB" > "$RUNNER_TEMP/digests/dockerhub/${PLATFORM_TAG}.txt"
       - name: Upload release digests
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-digests-${{ matrix.component }}-${{ matrix.platform_tag }}
-          path: |
-            ${{ runner.temp }}/digests/ghcr/${{ matrix.platform_tag }}.txt
-            ${{ runner.temp }}/digests/dockerhub/${{ matrix.platform_tag }}.txt
+          path: ${{ runner.temp }}/digests/ghcr/${{ matrix.platform_tag }}.txt
           if-no-files-found: error
 
   publish-docker-image-release:
     needs:
       - build-docker-image-release
     if: always() && needs.build-docker-image-release.result == 'success' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    environment: "protected branches"
     strategy:
       fail-fast: false
       matrix:
@@ -1415,11 +1383,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Log in to Docker Hub
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Download release digests
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1430,7 +1393,7 @@ jobs:
         id: meta-ghcr
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/langfuse/${{ matrix.image_name }}
+          images: ghcr.io/placer-labs/${{ matrix.image_name }}
           flavor: |
             latest=false
           tags: |
@@ -1440,22 +1403,6 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref, '-rc') }}
             type=semver,pattern={{major}},enable=${{ !contains(github.ref, '-rc') }}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v4') && !contains(github.ref, '-rc') }}
-      - name: Extract metadata (tags) for Docker Hub
-        id: meta-dockerhub
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: langfuse/${{ matrix.image_name }}
-          flavor: |
-            latest=false
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=sha
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref, '-rc') }}
-            type=semver,pattern={{major}},enable=${{ !contains(github.ref, '-rc') }}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v4') && !contains(github.ref, '-rc') }}
       - name: Publish multi-platform manifest to GitHub Container Registry
         env:
           STEPS_META_GHCR_OUTPUTS_TAGS: ${{ steps.meta-ghcr.outputs.tags }}
@@ -1475,7 +1422,7 @@ jobs:
           shopt -s nullglob
           for digest_file in "$RUNNER_TEMP"/digests/ghcr/*.txt; do
             digest="$(cat "$digest_file")"
-            ghcr_sources+=("ghcr.io/langfuse/${IMAGE_NAME}@$digest")
+            ghcr_sources+=("ghcr.io/placer-labs/${IMAGE_NAME}@$digest")
           done
 
           if [ "${#ghcr_sources[@]}" -lt 2 ]; then
@@ -1497,57 +1444,16 @@ jobs:
             sleep $((attempt * 15))
             attempt=$((attempt + 1))
           done
-      - name: Publish multi-platform manifest to Docker Hub
-        env:
-          STEPS_META_DOCKERHUB_OUTPUTS_TAGS: ${{ steps.meta-dockerhub.outputs.tags }}
-          IMAGE_NAME: ${{ matrix.image_name }}
-          COMPONENT: ${{ matrix.component }}
-        run: |
-          dockerhub_tags=()
-          dockerhub_sources=()
-
-          while IFS= read -r tag; do
-            [ -n "$tag" ] || continue
-            dockerhub_tags+=("-t" "$tag")
-          done <<EOF
-          ${STEPS_META_DOCKERHUB_OUTPUTS_TAGS}
-          EOF
-
-          shopt -s nullglob
-          for digest_file in "$RUNNER_TEMP"/digests/dockerhub/*.txt; do
-            digest="$(cat "$digest_file")"
-            dockerhub_sources+=("langfuse/${IMAGE_NAME}@$digest")
-          done
-
-          if [ "${#dockerhub_sources[@]}" -lt 2 ]; then
-            echo "Expected amd64 and arm64 Docker Hub digests for $COMPONENT"
-            exit 1
-          fi
-
-          # See the retry comment on the GHCR manifest publish step above — this
-          # is the exact step that timed out twice during the v3.223 release.
-          attempt=1
-          until docker buildx imagetools create "${dockerhub_tags[@]}" "${dockerhub_sources[@]}"; do
-            if [ "$attempt" -ge 3 ]; then
-              echo "Publishing Docker Hub manifest failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "Attempt $attempt failed, retrying in $((attempt * 15))s..." >&2
-            sleep $((attempt * 15))
-            attempt=$((attempt + 1))
-          done
-      - name: Inspect published manifests
+      - name: Inspect published manifest
         run: |
           ghcr_first_tag="$(printf '%s\n' "${STEPS_META_GHCR_OUTPUTS_TAGS}" | sed -n '1p')"
-          dockerhub_first_tag="$(printf '%s\n' "${STEPS_META_DOCKERHUB_OUTPUTS_TAGS}" | sed -n '1p')"
-
           docker buildx imagetools inspect "$ghcr_first_tag"
-          docker buildx imagetools inspect "$dockerhub_first_tag"
         env:
           STEPS_META_GHCR_OUTPUTS_TAGS: ${{ steps.meta-ghcr.outputs.tags }}
-          STEPS_META_DOCKERHUB_OUTPUTS_TAGS: ${{ steps.meta-dockerhub.outputs.tags }}
 
   notify-docker-image-release:
+    env:
+      SLACK_WEBHOOK: ${{ secrets.SLACK_CI_FAILURE_WORKFLOW_WEBHOOK_URL }}
     needs:
       - build-docker-image-release
       - publish-docker-image-release
@@ -1565,7 +1471,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Notify Slack
-        if: failure()
+        if: failure() && env.SLACK_WEBHOOK != ''
         uses: ./.github/actions/notify-slack-failure
         with:
           title: "❌ Docker Release Failed"
