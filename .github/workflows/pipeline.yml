@@ -469,13 +469,11 @@ jobs:
     strategy:
       matrix:
         node-version: [24]
-        # Prod is Cloud SQL POSTGRES_17, which is also the compose default.
-        # Upstream's 12 and 15 legs are compatibility coverage for versions we
-        # do not run.
+        # 17 is the compose default and the version this fork runs; upstream's
+        # extra legs are compatibility coverage it does not need.
         postgres-version: [17]
-        # Our deployment is GCS object storage and Redis Sentinel, so the
-        # -azure and -redis-cluster topologies test neither what we run nor
-        # anything our delta touches.
+        # The -azure and -redis-cluster topologies are not deployed here, and
+        # nothing in this fork's delta is specific to either.
         deploy-mode: [""]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -637,13 +635,11 @@ jobs:
     strategy:
       matrix:
         node-version: [24]
-        # Prod is Cloud SQL POSTGRES_17, which is also the compose default.
-        # Upstream's 12 and 15 legs are compatibility coverage for versions we
-        # do not run.
+        # 17 is the compose default and the version this fork runs; upstream's
+        # extra legs are compatibility coverage it does not need.
         postgres-version: [17]
-        # Our deployment is GCS object storage and Redis Sentinel, so the
-        # -azure and -redis-cluster topologies test neither what we run nor
-        # anything our delta touches.
+        # The -azure and -redis-cluster topologies are not deployed here, and
+        # nothing in this fork's delta is specific to either.
         deploy-mode: [""]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
