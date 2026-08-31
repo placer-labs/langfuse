@@ -721,7 +721,11 @@ jobs:
     needs:
       - pre-job
       - llm-connections-filter
-    if: ${{ !cancelled() && (startsWith(github.ref, 'refs/tags/') || ((github.event_name != 'push' || needs.pre-job.outputs.should_skip != 'true') && (needs.llm-connections-filter.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'))) }}
+    # Calls the real providers with the LANGFUSE_LLM_CONNECTION_* secrets, which
+    # only the upstream repository holds. On a fork the keys resolve empty and the
+    # job fails, taking all-ci-passed and the tag-gated release with it — and the
+    # tag branch of the condition below means it fires on every release.
+    if: ${{ !cancelled() && github.repository == 'langfuse/langfuse' && (startsWith(github.ref, 'refs/tags/') || ((github.event_name != 'push' || needs.pre-job.outputs.should_skip != 'true') && (needs.llm-connections-filter.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'))) }}
     name: test-worker-llm-connections (node24, pg15)
     env:
       NODE_ENV: test
