@@ -10,6 +10,7 @@ on:
     branches:
       - "main"
       - "v3" # OSS maintenance branch — releases are cut from it like from main
+      - "placer/main" # this fork's line: upstream main plus our changes
     tags:
       - "v*"
   merge_group:
