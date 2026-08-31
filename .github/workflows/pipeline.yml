@@ -10,6 +10,7 @@ on:
     branches:
       - "main"
       - "v3" # OSS maintenance branch — releases are cut from it like from main
+      - "placer/main-v3" # this fork's v3 line: upstream v3 plus our changes
     tags:
       - "v*"
   merge_group:
@@ -468,8 +469,14 @@ jobs:
     strategy:
       matrix:
         node-version: [24]
-        postgres-version: [12, 15]
-        deploy-mode: ["", "-azure", "-redis-cluster"]
+        # Prod is Cloud SQL POSTGRES_17, which is also the compose default.
+        # Upstream's 12 and 15 legs are compatibility coverage for versions we
+        # do not run.
+        postgres-version: [17]
+        # Our deployment is GCS object storage and Redis Sentinel, so the
+        # -azure and -redis-cluster topologies test neither what we run nor
+        # anything our delta touches.
+        deploy-mode: [""]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -630,8 +637,14 @@ jobs:
     strategy:
       matrix:
         node-version: [24]
-        postgres-version: [12, 15]
-        deploy-mode: ["", "-azure", "-redis-cluster"]
+        # Prod is Cloud SQL POSTGRES_17, which is also the compose default.
+        # Upstream's 12 and 15 legs are compatibility coverage for versions we
+        # do not run.
+        postgres-version: [17]
+        # Our deployment is GCS object storage and Redis Sentinel, so the
+        # -azure and -redis-cluster topologies test neither what we run nor
+        # anything our delta touches.
+        deploy-mode: [""]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -720,7 +733,11 @@ jobs:
     needs:
       - pre-job
       - llm-connections-filter
-    if: ${{ !cancelled() && (startsWith(github.ref, 'refs/tags/') || ((github.event_name != 'push' || needs.pre-job.outputs.should_skip != 'true') && (needs.llm-connections-filter.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'))) }}
+    # Calls the real providers with the LANGFUSE_LLM_CONNECTION_* secrets, which
+    # only the upstream repository holds. On a fork the keys resolve empty and the
+    # job fails, taking all-ci-passed and the tag-gated release with it — and the
+    # tag branch of the condition below means it fires on every release.
+    if: ${{ !cancelled() && github.repository == 'langfuse/langfuse' && (startsWith(github.ref, 'refs/tags/') || ((github.event_name != 'push' || needs.pre-job.outputs.should_skip != 'true') && (needs.llm-connections-filter.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'))) }}
     name: test-worker-llm-connections (node24, pg15)
     env:
       NODE_ENV: test
