@@ -710,7 +710,13 @@ describe("traces trpc", () => {
 
     // Written to both tables so the test holds under either v4 write mode:
     // enforceTraceAccess reads the events table under events_only and the
-    // legacy table otherwise.
+    // legacy table otherwise. events_full only exists where the ClickHouse
+    // dev-tables setup ran — the -azure and -redis-cluster CI legs skip it and
+    // stay on legacy writes — so mirror the trace there only when the events
+    // pipeline is on.
+    const eventsTableAvailable =
+      env.LANGFUSE_MIGRATION_V4_WRITE_MODE !== "legacy";
+
     const seedTrace = async (traceId: string, timestamp: Date) => {
       await createTracesCh([
         createTrace({
@@ -719,21 +725,25 @@ describe("traces trpc", () => {
           timestamp: timestamp.getTime(),
         }),
       ]);
-      const spanId = randomUUID();
-      await createEventsCh([
-        createEvent({
-          id: spanId,
-          span_id: spanId,
-          trace_id: traceId,
-          project_id: projectId,
-          parent_span_id: "",
-          start_time: timestamp.getTime() * 1000,
-        }),
-      ]);
+      if (eventsTableAvailable) {
+        const spanId = randomUUID();
+        await createEventsCh([
+          createEvent({
+            id: spanId,
+            span_id: spanId,
+            trace_id: traceId,
+            project_id: projectId,
+            parent_span_id: "",
+            start_time: timestamp.getTime() * 1000,
+          }),
+        ]);
+      }
       await waitForExpect(async () => {
         const [legacy, events] = await Promise.all([
           getTraceByIdFromTracesTable({ projectId, traceId }),
-          getTraceByIdFromEventsTable({ projectId, traceId }),
+          eventsTableAvailable
+            ? getTraceByIdFromEventsTable({ projectId, traceId })
+            : Promise.resolve(undefined),
         ]);
         expect(legacy?.id ?? events?.id).toBe(traceId);
       });
