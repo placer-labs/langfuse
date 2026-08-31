@@ -1169,14 +1169,14 @@ jobs:
             exit 1
           fi
 
-          mkdir -p "$RUNNER_TEMP/digests/ghcr"
-          printf '%s\n' "$DIGEST_GHCR" > "$RUNNER_TEMP/digests/ghcr/${PLATFORM_TAG}.txt"
+          mkdir -p "$RUNNER_TEMP/digests"
+          printf '%s\n' "$DIGEST_GHCR" > "$RUNNER_TEMP/digests/${PLATFORM_TAG}.txt"
       - name: Upload release digests
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-digests-${{ matrix.component }}-${{ matrix.platform_tag }}
           path: |
-            ${{ runner.temp }}/digests/ghcr/${{ matrix.platform_tag }}.txt
+            ${{ runner.temp }}/digests/${{ matrix.platform_tag }}.txt
           if-no-files-found: error
 
   publish-docker-image-release:
@@ -1243,7 +1243,7 @@ jobs:
           EOF
 
           shopt -s nullglob
-          for digest_file in "$RUNNER_TEMP"/digests/ghcr/*.txt; do
+          for digest_file in "$RUNNER_TEMP"/digests/*.txt; do
             digest="$(cat "$digest_file")"
             ghcr_sources+=("ghcr.io/placer-labs/${IMAGE_NAME}@$digest")
           done
