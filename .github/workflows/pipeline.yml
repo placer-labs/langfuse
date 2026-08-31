@@ -469,13 +469,11 @@ jobs:
     strategy:
       matrix:
         node-version: [24]
-        # Prod is Cloud SQL POSTGRES_17, which is also the compose default.
-        # Upstream's 12 and 15 legs are compatibility coverage for versions we
-        # do not run.
+        # 17 is the compose default and the version this fork runs; upstream's
+        # extra legs are compatibility coverage it does not need.
         postgres-version: [17]
-        # Our deployment is GCS object storage and Redis Sentinel, so the
-        # -azure and -redis-cluster topologies test neither what we run nor
-        # anything our delta touches.
+        # The -azure and -redis-cluster topologies are not deployed here, and
+        # nothing in this fork's delta is specific to either.
         deploy-mode: [""]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -637,13 +635,11 @@ jobs:
     strategy:
       matrix:
         node-version: [24]
-        # Prod is Cloud SQL POSTGRES_17, which is also the compose default.
-        # Upstream's 12 and 15 legs are compatibility coverage for versions we
-        # do not run.
+        # 17 is the compose default and the version this fork runs; upstream's
+        # extra legs are compatibility coverage it does not need.
         postgres-version: [17]
-        # Our deployment is GCS object storage and Redis Sentinel, so the
-        # -azure and -redis-cluster topologies test neither what we run nor
-        # anything our delta touches.
+        # The -azure and -redis-cluster topologies are not deployed here, and
+        # nothing in this fork's delta is specific to either.
         deploy-mode: [""]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -1173,14 +1169,14 @@ jobs:
             exit 1
           fi
 
-          mkdir -p "$RUNNER_TEMP/digests/ghcr"
-          printf '%s\n' "$DIGEST_GHCR" > "$RUNNER_TEMP/digests/ghcr/${PLATFORM_TAG}.txt"
+          mkdir -p "$RUNNER_TEMP/digests"
+          printf '%s\n' "$DIGEST_GHCR" > "$RUNNER_TEMP/digests/${PLATFORM_TAG}.txt"
       - name: Upload release digests
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-digests-${{ matrix.component }}-${{ matrix.platform_tag }}
           path: |
-            ${{ runner.temp }}/digests/ghcr/${{ matrix.platform_tag }}.txt
+            ${{ runner.temp }}/digests/${{ matrix.platform_tag }}.txt
           if-no-files-found: error
 
   publish-docker-image-release:
@@ -1247,7 +1243,7 @@ jobs:
           EOF
 
           shopt -s nullglob
-          for digest_file in "$RUNNER_TEMP"/digests/ghcr/*.txt; do
+          for digest_file in "$RUNNER_TEMP"/digests/*.txt; do
             digest="$(cat "$digest_file")"
             ghcr_sources+=("ghcr.io/placer-labs/${IMAGE_NAME}@$digest")
           done
