@@ -601,8 +601,12 @@ jobs:
     strategy:
       matrix:
         node-version: [24]
-        postgres-version: [15]
-        deploy-mode: ["", "-azure", "-redis-cluster"]
+        # 17 is the compose default and the version this fork runs; upstream's
+        # extra leg is compatibility coverage it does not need.
+        postgres-version: [17]
+        # The -azure and -redis-cluster topologies are not deployed here, and
+        # nothing in this fork's delta is specific to either.
+        deploy-mode: [""]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -809,8 +813,12 @@ jobs:
     strategy:
       matrix:
         node-version: [24]
-        postgres-version: [15]
-        deploy-mode: ["", "-azure", "-redis-cluster"]
+        # 17 is the compose default and the version this fork runs; upstream's
+        # extra leg is compatibility coverage it does not need.
+        postgres-version: [17]
+        # The -azure and -redis-cluster topologies are not deployed here, and
+        # nothing in this fork's delta is specific to either.
+        deploy-mode: [""]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
