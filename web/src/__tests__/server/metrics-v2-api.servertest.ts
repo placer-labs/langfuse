@@ -288,6 +288,10 @@ describe("/api/public/v2/metrics API Endpoint", () => {
     });
 
     it("should support latency metrics with microsecond to millisecond conversion", async () => {
+      // Scoped to this file's own trace. Unfiltered, the average covers every
+      // observation the whole `server` suite wrote to the shared project in the
+      // last 24h, some of which end before they start — so the assertion below
+      // failed or passed on test interleaving rather than on the conversion.
       const query = {
         view: "observations",
         metrics: [{ measure: "latency", aggregation: "avg" }],
