@@ -209,12 +209,16 @@ describe("URL Normalization and Edge Cases", () => {
       ).rejects.toThrow(/DNS lookup failed/);
     });
 
+    // Both cases wait on a real resolver to give up on a name that does not
+    // exist, and validateOutboundUrl sets no DNS deadline of its own. The
+    // GitHub-hosted runners take longer to return NXDOMAIN than the Blacksmith
+    // runners upstream, so these need a deadline well clear of the resolver's.
     it("should handle URLs with many subdomains", async () => {
       const manySubdomains = Array(50).fill("sub").join(".") + ".example.com";
       await expect(
         validateWebhookURL(`https://${manySubdomains}/webhook`),
       ).rejects.toThrow(/DNS lookup failed/);
-    }, 10000);
+    }, 30000);
 
     it("should handle empty hostname", async () => {
       // This URL is parsed as hostname="webhook" by URL constructor
@@ -222,7 +226,7 @@ describe("URL Normalization and Edge Cases", () => {
       await expect(validateWebhookURL("http:///webhook")).rejects.toThrow(
         "DNS lookup failed for webhook",
       );
-    });
+    }, 30000);
   });
 
   describe("Path and query parameter edge cases", () => {
