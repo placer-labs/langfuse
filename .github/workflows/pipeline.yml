@@ -1277,7 +1277,10 @@ jobs:
   build-docker-image-release:
     needs: all-ci-passed
     # if something inside all-ci-passed was skipped, but everything that ran passed, we still want to deploy
-    if: always() && needs.all-ci-passed.outputs.success == 'true' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    # Tags cut a pinned release; pushes to our line publish the moving
+    # placer-main tag that deployments track by digest, so a merge is enough to
+    # ship and nobody has to hand-cut a version.
+    if: always() && needs.all-ci-passed.outputs.success == 'true' && github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/placer/main')
     strategy:
       fail-fast: false
       matrix:
@@ -1375,7 +1378,7 @@ jobs:
   publish-docker-image-release:
     needs:
       - build-docker-image-release
-    if: always() && needs.build-docker-image-release.result == 'success' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    if: always() && needs.build-docker-image-release.result == 'success' && github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/placer/main')
     strategy:
       fail-fast: false
       matrix:
@@ -1470,7 +1473,7 @@ jobs:
     needs:
       - build-docker-image-release
       - publish-docker-image-release
-    if: always() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    if: always() && github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/placer/main')
     runs-on: ubuntu-latest
     permissions:
       contents: read
