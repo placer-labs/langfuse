@@ -10,6 +10,7 @@ on:
     branches:
       - "main"
       - "v3" # OSS maintenance branch — releases are cut from it like from main
+      - "placer/main" # this fork's line: upstream main plus our changes
     tags:
       - "v*"
   merge_group:
@@ -47,7 +48,7 @@ jobs:
   # it instantly and their jobs start without waiting for it (~45-100s of
   # wall clock per run).
   pre-job:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     if: github.event_name == 'push'
     outputs:
       should_skip: ${{ steps.skip_check.outputs.should_skip }}
@@ -76,7 +77,7 @@ jobs:
           fi
 
   llm-connections-filter:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.filter.outputs.llm_connections }}
     timeout-minutes: 15
@@ -102,7 +103,7 @@ jobs:
 
   lint:
     timeout-minutes: 12
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     needs:
       - pre-job
     # pre-job only runs on push events; everywhere else it resolves as skipped
@@ -168,7 +169,7 @@ jobs:
         run: pnpm run typecheck
 
   knip:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     needs:
       - pre-job
     # pre-job only runs on push events; everywhere else it resolves as skipped
@@ -202,7 +203,7 @@ jobs:
         run: pnpm exec knip
 
   prettier-check:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     needs:
       - pre-job
     # pre-job only runs on push events; everywhere else it resolves as skipped
@@ -263,7 +264,7 @@ jobs:
           fi
 
   tests-eslint-plugin:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     needs:
       - pre-job
     # pre-job only runs on push events; everywhere else it resolves as skipped
@@ -299,7 +300,7 @@ jobs:
         run: pnpm --filter @repo/eslint-plugin run test
 
   tests-in-app-agent-sandbox-runtime:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     needs:
       - pre-job
@@ -346,7 +347,7 @@ jobs:
         run: pnpm --filter @repo/in-app-agent-sandbox-runtime run test:e2e
 
   tests-storybook:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     needs:
       - pre-job
     # pre-job only runs on push events; everywhere else it resolves as skipped
@@ -417,7 +418,7 @@ jobs:
 
   tests-shared:
     timeout-minutes: 15
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     needs:
       - pre-job
     # pre-job only runs on push events; everywhere else it resolves as skipped
@@ -509,11 +510,11 @@ jobs:
         include:
           - component: web
             service: langfuse-web
-            runner: blacksmith-8vcpu-ubuntu-2404
+            runner: ubuntu-latest
             health_url: http://localhost:3000/api/public/health
           - component: worker
             service: langfuse-worker
-            runner: blacksmith-4vcpu-ubuntu-2404
+            runner: ubuntu-latest
             health_url: http://localhost:3030/api/health
     steps:
       - name: Checkout
@@ -526,10 +527,8 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME_READ }}
           password: ${{ secrets.DOCKERHUB_TOKEN_READ }}
-      - name: Setup Blacksmith Builder
-        uses: useblacksmith/setup-docker-builder@1e75355f81cbb3f93cba1eb5dd5e5b05110ca8f9 # v2.0.1
-        with:
-          cache-key: langfuse/test-${{ matrix.component }}
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - name: Set NEXT_PUBLIC_BUILD_ID
         run: echo "NEXT_PUBLIC_BUILD_ID=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
       - name: Start dependency containers in background
@@ -589,7 +588,7 @@ jobs:
           if-no-files-found: ignore
   tests-web:
     timeout-minutes: 30
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     needs:
       - pre-job
     # pre-job only runs on push events; everywhere else it resolves as skipped
@@ -602,8 +601,12 @@ jobs:
     strategy:
       matrix:
         node-version: [24]
-        postgres-version: [15]
-        deploy-mode: ["", "-azure", "-redis-cluster"]
+        # 17 is the compose default and the version this fork runs; upstream's
+        # extra leg is compatibility coverage it does not need.
+        postgres-version: [17]
+        # The -azure and -redis-cluster topologies are not deployed here, and
+        # nothing in this fork's delta is specific to either.
+        deploy-mode: [""]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -749,7 +752,7 @@ jobs:
         # invocation, so they run in their own parallel job below.
         env:
           NODE_COMPILE_CACHE: /tmp/node-compile-cache
-        run: npx dotenv -e ../.env.test -e ../.env -- vitest run --project server --project server-isolated --project server-shared-source --project server-unit --project server-shared-source-unit --maxWorkers=8
+        run: npx dotenv -e ../.env.test -e ../.env -- vitest run --project server --project server-isolated --project server-shared-source --project server-unit --project server-shared-source-unit --maxWorkers=4
       - name: Prune stale turbo cache entries
         if: env.CI_CACHE_ALLOWED == 'true'
         # Each run saves the restored archive plus new entries, so the cache
@@ -758,7 +761,7 @@ jobs:
 
   tests-web-client:
     timeout-minutes: 10
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     needs:
       - pre-job
     if: ${{ !cancelled() && (github.event_name != 'push' || needs.pre-job.outputs.should_skip != 'true') }}
@@ -797,7 +800,7 @@ jobs:
 
   tests-worker:
     timeout-minutes: 20
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     needs:
       - pre-job
     # pre-job only runs on push events; everywhere else it resolves as skipped
@@ -810,8 +813,12 @@ jobs:
     strategy:
       matrix:
         node-version: [24]
-        postgres-version: [15]
-        deploy-mode: ["", "-azure", "-redis-cluster"]
+        # 17 is the compose default and the version this fork runs; upstream's
+        # extra leg is compatibility coverage it does not need.
+        postgres-version: [17]
+        # The -azure and -redis-cluster topologies are not deployed here, and
+        # nothing in this fork's delta is specific to either.
+        deploy-mode: [""]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -896,11 +903,15 @@ jobs:
           LANGFUSE_CODE_EVAL_AWS_LAMBDA_ENDPOINT: ${{ matrix.deploy-mode == '' && 'http://localhost:4566' || '' }}
   test-worker-llm-connections:
     timeout-minutes: 20
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     needs:
       - pre-job
       - llm-connections-filter
-    if: ${{ !cancelled() && (startsWith(github.ref, 'refs/tags/') || ((github.event_name != 'push' || needs.pre-job.outputs.should_skip != 'true') && (needs.llm-connections-filter.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'))) }}
+    # Calls the real providers with the LANGFUSE_LLM_CONNECTION_* secrets, which
+    # only the upstream repository holds. On a fork the keys resolve empty and the
+    # job fails, taking all-ci-passed and the tag-gated release with it — and the
+    # tag branch of the condition below means it fires on every release.
+    if: ${{ !cancelled() && github.repository == 'langfuse/langfuse' && (startsWith(github.ref, 'refs/tags/') || ((github.event_name != 'push' || needs.pre-job.outputs.should_skip != 'true') && (needs.llm-connections-filter.outputs.changed == 'true' || github.event_name == 'workflow_dispatch'))) }}
     name: test-worker-llm-connections (node24, pg15)
     env:
       NODE_ENV: test
@@ -977,7 +988,7 @@ jobs:
           LANGFUSE_LLM_CONNECTION_GOOGLEAISTUDIO_KEY: ${{ secrets.LANGFUSE_LLM_CONNECTION_GOOGLEAISTUDIO_KEY }}
 
   e2e-tests:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     needs:
       - pre-job
     # pre-job only runs on push events; everywhere else it resolves as skipped
@@ -1100,7 +1111,7 @@ jobs:
         run: pnpm --filter=web run test:e2e
 
   e2e-server-tests:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     needs:
       - pre-job
     # pre-job only runs on push events; everywhere else it resolves as skipped
@@ -1202,8 +1213,10 @@ jobs:
         run: find .turbo/cache -type f -mtime +3 -delete 2>/dev/null || true
 
   all-ci-passed:
+    env:
+      SLACK_WEBHOOK: ${{ secrets.SLACK_CI_FAILURE_WORKFLOW_WEBHOOK_URL }}
     # This allows us to have a branch protection rule for tests and deploys with matrix
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     needs:
       [
         lint,
@@ -1249,7 +1262,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Notify Slack
-        if: failure() && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/v3' || startsWith(github.ref, 'refs/tags/'))
+        if: failure() && env.SLACK_WEBHOOK != '' && github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/v3' || startsWith(github.ref, 'refs/tags/'))
         uses: ./.github/actions/notify-slack-failure
         with:
           title: "❌ CI Failed"
@@ -1264,8 +1277,10 @@ jobs:
   build-docker-image-release:
     needs: all-ci-passed
     # if something inside all-ci-passed was skipped, but everything that ran passed, we still want to deploy
-    if: always() && needs.all-ci-passed.outputs.success == 'true' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    environment: "protected branches"
+    # Tags cut a pinned release; pushes to our line publish the moving
+    # placer-main tag that deployments track by digest, so a merge is enough to
+    # ship and nobody has to hand-cut a version.
+    if: always() && needs.all-ci-passed.outputs.success == 'true' && github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/placer/main')
     strategy:
       fail-fast: false
       matrix:
@@ -1275,25 +1290,25 @@ jobs:
             dockerfile: ./web/Dockerfile
             platform: linux/amd64
             platform_tag: amd64
-            runner: blacksmith-4vcpu-ubuntu-2404
+            runner: ubuntu-latest
           - component: web
             image_name: langfuse
             dockerfile: ./web/Dockerfile
             platform: linux/arm64
             platform_tag: arm64
-            runner: blacksmith-4vcpu-ubuntu-2404-arm
+            runner: ubuntu-24.04-arm
           - component: worker
             image_name: langfuse-worker
             dockerfile: ./worker/Dockerfile
             platform: linux/amd64
             platform_tag: amd64
-            runner: blacksmith-4vcpu-ubuntu-2404
+            runner: ubuntu-latest
           - component: worker
             image_name: langfuse-worker
             dockerfile: ./worker/Dockerfile
             platform: linux/arm64
             platform_tag: arm64
-            runner: blacksmith-4vcpu-ubuntu-2404-arm
+            runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     permissions:
       packages: write
@@ -1312,30 +1327,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Log in to Docker Hub
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-      # build-push-action v2 requires this step; it no longer sets up buildkit
-      # itself. Both inputs are load-bearing, do not drop them:
-      # - cache-key is required as of setup-docker-builder v2. Without it the
-      #   action errors and falls back to a local builder, which is how the
-      #   v4.2.0 and v4.3.0 releases silently lost their layer cache.
-      # - nofallback makes that degradation fail the job instead of emitting a
-      #   warning nobody reads. Releases are rare and cache-cold builds are
-      #   slow, so a Blacksmith outage should block the release, not hide in it.
-      - name: Setup Blacksmith Builder
-        uses: useblacksmith/setup-docker-builder@1e75355f81cbb3f93cba1eb5dd5e5b05110ca8f9 # v2.0.1
-        with:
-          cache-key: langfuse/${{ matrix.image_name }}-${{ matrix.platform_tag }}
-          nofallback: "true"
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
       - name: Extract metadata (labels) for Docker
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: |
-            ghcr.io/langfuse/${{ matrix.image_name }}
+            ghcr.io/placer-labs/${{ matrix.image_name }}
             langfuse/${{ matrix.image_name }}
           flavor: |
             latest=false
@@ -1346,25 +1345,13 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref, '-rc') }}
             type=semver,pattern={{major}},enable=${{ !contains(github.ref, '-rc') }}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v4') && !contains(github.ref, '-rc') }}
       - name: Build and push image by digest to GitHub Container Registry (${{ matrix.component }}, ${{ matrix.platform_tag }})
         id: build-ghcr
-        uses: useblacksmith/build-push-action@fb9e3e6a9299c78462bfadd0d93352c316adc9b8 # v2.2.0
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           context: .
           file: ${{ matrix.dockerfile }}
-          outputs: type=image,name=ghcr.io/langfuse/${{ matrix.image_name }},push-by-digest=true,name-canonical=true,push=true
-          labels: ${{ steps.meta.outputs.labels }}
-          platforms: ${{ matrix.platform }}
-          provenance: false
-          sbom: false
-      - name: Build and push image by digest to Docker Hub (${{ matrix.component }}, ${{ matrix.platform_tag }})
-        id: build-dockerhub
-        uses: useblacksmith/build-push-action@fb9e3e6a9299c78462bfadd0d93352c316adc9b8 # v2.2.0
-        with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          outputs: type=image,name=langfuse/${{ matrix.image_name }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=ghcr.io/placer-labs/${{ matrix.image_name }},push-by-digest=true,name-canonical=true,push=true
           labels: ${{ steps.meta.outputs.labels }}
           platforms: ${{ matrix.platform }}
           provenance: false
@@ -1372,31 +1359,26 @@ jobs:
       - name: Record pushed digests
         env:
           DIGEST_GHCR: ${{ steps.build-ghcr.outputs.digest }}
-          DIGEST_DOCKERHUB: ${{ steps.build-dockerhub.outputs.digest }}
           PLATFORM_TAG: ${{ matrix.platform_tag }}
         run: |
-          if [ -z "$DIGEST_GHCR" ] || [ -z "$DIGEST_DOCKERHUB" ]; then
+          if [ -z "$DIGEST_GHCR" ]; then
             echo "Missing registry digest output"
             exit 1
           fi
 
-          mkdir -p "$RUNNER_TEMP/digests/ghcr" "$RUNNER_TEMP/digests/dockerhub"
-          printf '%s\n' "$DIGEST_GHCR" > "$RUNNER_TEMP/digests/ghcr/${PLATFORM_TAG}.txt"
-          printf '%s\n' "$DIGEST_DOCKERHUB" > "$RUNNER_TEMP/digests/dockerhub/${PLATFORM_TAG}.txt"
+          mkdir -p "$RUNNER_TEMP/digests"
+          printf '%s\n' "$DIGEST_GHCR" > "$RUNNER_TEMP/digests/${PLATFORM_TAG}.txt"
       - name: Upload release digests
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-digests-${{ matrix.component }}-${{ matrix.platform_tag }}
-          path: |
-            ${{ runner.temp }}/digests/ghcr/${{ matrix.platform_tag }}.txt
-            ${{ runner.temp }}/digests/dockerhub/${{ matrix.platform_tag }}.txt
+          path: ${{ runner.temp }}/digests/${{ matrix.platform_tag }}.txt
           if-no-files-found: error
 
   publish-docker-image-release:
     needs:
       - build-docker-image-release
-    if: always() && needs.build-docker-image-release.result == 'success' && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    environment: "protected branches"
+    if: always() && needs.build-docker-image-release.result == 'success' && github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/placer/main')
     strategy:
       fail-fast: false
       matrix:
@@ -1405,7 +1387,7 @@ jobs:
             image_name: langfuse
           - component: worker
             image_name: langfuse-worker
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     permissions:
       packages: write
       contents: read
@@ -1417,11 +1399,6 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Log in to Docker Hub
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Download release digests
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -1432,7 +1409,7 @@ jobs:
         id: meta-ghcr
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
-          images: ghcr.io/langfuse/${{ matrix.image_name }}
+          images: ghcr.io/placer-labs/${{ matrix.image_name }}
           flavor: |
             latest=false
           tags: |
@@ -1442,22 +1419,6 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref, '-rc') }}
             type=semver,pattern={{major}},enable=${{ !contains(github.ref, '-rc') }}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v4') && !contains(github.ref, '-rc') }}
-      - name: Extract metadata (tags) for Docker Hub
-        id: meta-dockerhub
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: langfuse/${{ matrix.image_name }}
-          flavor: |
-            latest=false
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=sha
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ !contains(github.ref, '-rc') }}
-            type=semver,pattern={{major}},enable=${{ !contains(github.ref, '-rc') }}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v4') && !contains(github.ref, '-rc') }}
       - name: Publish multi-platform manifest to GitHub Container Registry
         env:
           STEPS_META_GHCR_OUTPUTS_TAGS: ${{ steps.meta-ghcr.outputs.tags }}
@@ -1475,9 +1436,9 @@ jobs:
           EOF
 
           shopt -s nullglob
-          for digest_file in "$RUNNER_TEMP"/digests/ghcr/*.txt; do
+          for digest_file in "$RUNNER_TEMP"/digests/*.txt; do
             digest="$(cat "$digest_file")"
-            ghcr_sources+=("ghcr.io/langfuse/${IMAGE_NAME}@$digest")
+            ghcr_sources+=("ghcr.io/placer-labs/${IMAGE_NAME}@$digest")
           done
 
           if [ "${#ghcr_sources[@]}" -lt 2 ]; then
@@ -1499,62 +1460,21 @@ jobs:
             sleep $((attempt * 15))
             attempt=$((attempt + 1))
           done
-      - name: Publish multi-platform manifest to Docker Hub
-        env:
-          STEPS_META_DOCKERHUB_OUTPUTS_TAGS: ${{ steps.meta-dockerhub.outputs.tags }}
-          IMAGE_NAME: ${{ matrix.image_name }}
-          COMPONENT: ${{ matrix.component }}
-        run: |
-          dockerhub_tags=()
-          dockerhub_sources=()
-
-          while IFS= read -r tag; do
-            [ -n "$tag" ] || continue
-            dockerhub_tags+=("-t" "$tag")
-          done <<EOF
-          ${STEPS_META_DOCKERHUB_OUTPUTS_TAGS}
-          EOF
-
-          shopt -s nullglob
-          for digest_file in "$RUNNER_TEMP"/digests/dockerhub/*.txt; do
-            digest="$(cat "$digest_file")"
-            dockerhub_sources+=("langfuse/${IMAGE_NAME}@$digest")
-          done
-
-          if [ "${#dockerhub_sources[@]}" -lt 2 ]; then
-            echo "Expected amd64 and arm64 Docker Hub digests for $COMPONENT"
-            exit 1
-          fi
-
-          # See the retry comment on the GHCR manifest publish step above — this
-          # is the exact step that timed out twice during the v3.223 release.
-          attempt=1
-          until docker buildx imagetools create "${dockerhub_tags[@]}" "${dockerhub_sources[@]}"; do
-            if [ "$attempt" -ge 3 ]; then
-              echo "Publishing Docker Hub manifest failed after 3 attempts" >&2
-              exit 1
-            fi
-            echo "Attempt $attempt failed, retrying in $((attempt * 15))s..." >&2
-            sleep $((attempt * 15))
-            attempt=$((attempt + 1))
-          done
-      - name: Inspect published manifests
+      - name: Inspect published manifest
         run: |
           ghcr_first_tag="$(printf '%s\n' "${STEPS_META_GHCR_OUTPUTS_TAGS}" | sed -n '1p')"
-          dockerhub_first_tag="$(printf '%s\n' "${STEPS_META_DOCKERHUB_OUTPUTS_TAGS}" | sed -n '1p')"
-
           docker buildx imagetools inspect "$ghcr_first_tag"
-          docker buildx imagetools inspect "$dockerhub_first_tag"
         env:
           STEPS_META_GHCR_OUTPUTS_TAGS: ${{ steps.meta-ghcr.outputs.tags }}
-          STEPS_META_DOCKERHUB_OUTPUTS_TAGS: ${{ steps.meta-dockerhub.outputs.tags }}
 
   notify-docker-image-release:
+    env:
+      SLACK_WEBHOOK: ${{ secrets.SLACK_CI_FAILURE_WORKFLOW_WEBHOOK_URL }}
     needs:
       - build-docker-image-release
       - publish-docker-image-release
-    if: always() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    if: always() && github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/placer/main')
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       actions: read
@@ -1567,7 +1487,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Notify Slack
-        if: failure()
+        if: failure() && env.SLACK_WEBHOOK != ''
         uses: ./.github/actions/notify-slack-failure
         with:
           title: "❌ Docker Release Failed"
