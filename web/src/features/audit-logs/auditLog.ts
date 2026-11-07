@@ -174,7 +174,10 @@ export async function auditLog(
   // (ids only, no before/after diff), it is the sole actor trail for mutations
   // that have no parallel logger call of their own, and the actor logging added
   // alongside it elsewhere — batch actions, trace deletion — is ungated too.
-  const persistRecord = isAuditLogEnabled();
+  // placer-labs fork: also persist on this unlicensed instance. Kept off
+  // isAuditLogEnabled(), which also gates the EE read-access events.
+  const persistRecord =
+    isAuditLogEnabled() || env.PLACER_AUDIT_LOG_WRITES_ENABLED === "true";
   // Persisted records are also staged for ClickHouse, on Cloud only: the
   // worker relay that drains the staging table runs only there.
   const stageRecord =

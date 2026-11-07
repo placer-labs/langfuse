@@ -786,6 +786,12 @@ export const env = createEnv({
       .enum(["org", "enforced", "disabled"])
       .default("org"),
 
+    // placer-labs fork: persist audit_logs rows on this unlicensed instance.
+    // Upstream writes them only with the audit-logs entitlement; the viewer and
+    // read-access events stay enterprise-only either way. "false" restores
+    // upstream behavior.
+    PLACER_AUDIT_LOG_WRITES_ENABLED: z.enum(["true", "false"]).default("true"),
+
     // Background-migration env gates. Mirror worker/src/env.ts (names, defaults)
     // so the background-migrations status endpoint can tell dormant, env-gated
     // rows apart from migrations the worker will actually pick up. The worker
@@ -1388,6 +1394,8 @@ export const env = createEnv({
       process.env.LANGFUSE_AUDIT_LOG_STAGING_ENABLED,
     LANGFUSE_AUDIT_LOG_ACCESS_EVENTS:
       process.env.LANGFUSE_AUDIT_LOG_ACCESS_EVENTS,
+    PLACER_AUDIT_LOG_WRITES_ENABLED:
+      process.env.PLACER_AUDIT_LOG_WRITES_ENABLED,
     LANGFUSE_BACKGROUND_MIGRATION_V4_ENABLE_HISTORIC_BACKFILL:
       process.env.LANGFUSE_BACKGROUND_MIGRATION_V4_ENABLE_HISTORIC_BACKFILL,
     LANGFUSE_BACKGROUND_MIGRATION_V4_DROP_PID_TID_SORTING_TABLES:

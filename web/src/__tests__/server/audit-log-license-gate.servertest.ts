@@ -21,6 +21,9 @@ vi.mock("@/src/env.mjs", async (importOriginal) => {
         if (prop === "LANGFUSE_EE_LICENSE_KEY") return mocks.licenseKey;
         if (prop === "LANGFUSE_AUDIT_LOG_STAGING_ENABLED")
           return mocks.stagingEnabled;
+        // placer-labs fork: test upstream's gate with our override off; the
+        // override is covered in placer-audit-log-writes.servertest.ts.
+        if (prop === "PLACER_AUDIT_LOG_WRITES_ENABLED") return "false";
         return Reflect.get(target, prop);
       },
     }),
