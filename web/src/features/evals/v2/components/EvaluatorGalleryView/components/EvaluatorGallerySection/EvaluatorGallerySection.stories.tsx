@@ -22,7 +22,7 @@ function StatefulEvaluatorGallerySection(args: EvaluatorGallerySectionProps) {
       expanded={expanded}
       onExpandedChange={(nextExpanded) => {
         setExpanded(nextExpanded);
-        args.onExpandedChange(nextExpanded);
+        args.onExpandedChange?.(nextExpanded);
       }}
     />
   );
@@ -36,9 +36,15 @@ const template = {
   icon: "gauge",
   description: "Assess whether the answer directly addresses the question.",
   maintainer: "langfuse",
+  previewScores: [{ name: "answer_relevance", value: "Relevant" }],
   evaluator: {
     type: EvalTemplateTypeEnum.LLM_AS_JUDGE,
-    prompt: "Rate the relevance of {{generation}} to {{query}}.",
+    promptMessages: [
+      {
+        role: "user",
+        content: "Rate the relevance of {{generation}} to {{query}}.",
+      },
+    ],
     variables: [{ name: "query", defaultMapping: { field: "input" } }],
     outputDefinition: {
       dataType: "NUMERIC",
@@ -100,11 +106,37 @@ const safetySection: GallerySection = {
   ],
 };
 
+const projectSection: GallerySection = {
+  key: "custom",
+  label: "Your templates",
+  description: "Start from a template this project already created.",
+  totalCount: 15,
+  templates: Array.from({ length: 15 }, (_, index) => ({
+    source: "custom" as const,
+    id: `evaluator-${index + 1}`,
+    name: `project-evaluator-${index + 1}`,
+    description: "Flags generations that miss the expected format.",
+    type: EvalTemplateTypeEnum.CODE,
+    updatedAt: new Date("2026-10-01T00:00:00.000Z"),
+    version: 1,
+  })),
+};
+
 const meta = preview.meta({ component: EvaluatorGallerySection });
 
 export const Collapsed = meta.story({
   args: {
     section: listSection,
+    expanded: false,
+    onExpandedChange: fn(),
+    onSelectTemplate: fn(),
+  },
+  render: StatefulEvaluatorGallerySection,
+});
+
+export const YourTemplatesCollapsed = meta.story({
+  args: {
+    section: projectSection,
     expanded: false,
     onExpandedChange: fn(),
     onSelectTemplate: fn(),

@@ -1,3 +1,4 @@
+import { env } from "@/src/env.mjs";
 import type { McpFeatureModule } from "../registry";
 import {
   listEvaluatorsTool,
@@ -46,6 +47,11 @@ import {
   handleAttachEvaluatorToEvaluationRule,
   handleDetachEvaluatorFromEvaluationRule,
 } from "./tools/manageEvaluationRuleEvaluators";
+import { handleTestEvaluator, testEvaluatorTool } from "./tools/testEvaluator";
+import {
+  handleRunBatchEvaluation,
+  runBatchEvaluationTool,
+} from "./tools/runBatchEvaluation";
 
 export const evalsFeature = {
   name: "evals",
@@ -63,6 +69,10 @@ export const evalsFeature = {
     {
       definition: getEvaluatorTool,
       handler: handleGetEvaluator,
+    },
+    {
+      definition: testEvaluatorTool,
+      handler: handleTestEvaluator,
     },
     { definition: createEvaluatorTool, handler: handleCreateEvaluator },
     { definition: updateEvaluatorTool, handler: handleUpdateEvaluator },
@@ -99,4 +109,18 @@ export const evalsFeature = {
       handler: handleDeleteEvaluationRule,
     },
   ],
+} as const satisfies McpFeatureModule;
+
+export const batchEvaluationsFeature = {
+  name: "batchEvaluations",
+  description:
+    "Run evaluators over existing observations in the current Langfuse project",
+  tools: [
+    {
+      definition: runBatchEvaluationTool,
+      handler: handleRunBatchEvaluation,
+    },
+  ],
+  isEnabled: async () =>
+    env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true",
 } as const satisfies McpFeatureModule;

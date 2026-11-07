@@ -11,14 +11,16 @@ import {
   createCodeEvaluator,
   createEvaluationRule,
 } from "@/src/__tests__/server/stable-evaluation-public-api-test-utils";
-import { EvaluatorService, RuleService } from "@/src/features/evals/server";
+import { EvaluatorService } from "@/src/features/evals/v2/server/evaluators/evaluatorService";
+import { RuleService } from "@/src/features/evals/v2/server/rules/ruleService";
 import {
   DeleteEvaluatorResponse,
   Evaluator,
   ListEvaluatorsResponse,
   LlmAsJudgeEvaluator,
-  PublicApiError,
-} from "@/src/features/public-api";
+} from "@/src/features/public-api/types/evaluation/evaluators";
+import { PublicApiError } from "@/src/features/public-api/types/public-api-errors";
+import { toApiReadMappings } from "@/src/features/public-api/server/evaluation/evaluationAdapters";
 
 describe("stable evaluators public API", () => {
   it("creates evaluators", async () => {
@@ -123,36 +125,65 @@ describe("stable evaluators public API", () => {
       { role: "user", content: "Classify updated: {{input}}" },
     ]);
 
-    const tooManyMessages = await makeAPICall(
+    const multiMessageEvaluator = await makeZodVerifiedAPICall(
+      Evaluator,
       "POST",
       "/api/public/v2/evaluators",
       {
-        name: "too many messages",
+        name: "multi-message evaluator",
         type: "llm_as_judge",
         prompt: [
-          { role: "user", content: "First" },
-          { role: "user", content: "Second" },
+          { role: "system", content: "Judge carefully" },
+          { role: "user", content: "Input: {{input}}" },
+          { role: "assistant", content: "I will return a score" },
         ],
         outputDefinition: { dataType: "BOOLEAN" },
       },
       auth,
+      201,
     );
-    expect(tooManyMessages.status).toBe(400);
+    expect(
+      LlmAsJudgeEvaluator.parse(multiMessageEvaluator.body).prompt,
+    ).toEqual([
+      { role: "system", content: "Judge carefully" },
+      { role: "user", content: "Input: {{input}}" },
+      { role: "assistant", content: "I will return a score" },
+    ]);
+    await expect(
+      prisma.evaluatorVersion.findFirstOrThrow({
+        where: { evaluatorId: multiMessageEvaluator.body.id },
+        select: { prompt: true, promptMessages: true },
+      }),
+    ).resolves.toEqual({
+      prompt: "Judge carefully\n\nInput: {{input}}\n\nI will return a score",
+      promptMessages: [
+        { role: "system", content: "Judge carefully" },
+        { role: "user", content: "Input: {{input}}" },
+        { role: "assistant", content: "I will return a score" },
+      ],
+    });
 
-    for (const role of ["assistant", "system", "developer"]) {
-      const invalidRole = await makeAPICall(
+    for (const prompt of [
+      [{ role: "developer", content: "Judge {{input}}" }],
+      [
+        { role: "user", content: "Judge {{input}}" },
+        { role: "system", content: "Too late" },
+      ],
+      [{ role: "user", content: "   " }],
+    ]) {
+      const invalidPrompt = await makeAPICall(
         "POST",
         "/api/public/v2/evaluators",
         {
-          name: "invalid role evaluator",
+          name: "invalid prompt evaluator",
           type: "llm_as_judge",
-          prompt: [{ role, content: "Judge {{input}}" }],
+          prompt,
           outputDefinition: { dataType: "BOOLEAN" },
         },
         auth,
       );
-      expect(invalidRole.status).toBe(400);
-      expect(PublicApiError.parse(invalidRole.body)).toMatchObject({
+      expect(invalidPrompt.status).toBe(400);
+      expect(PublicApiError.parse(invalidPrompt.body)).toMatchObject({
         code: "invalid_body",
       });
     }
@@ -218,7 +249,7 @@ describe("stable evaluators public API", () => {
         description: null,
         definition: {
           type: EvalTemplateType.LLM_AS_JUDGE,
-          prompt: "Judge {{input}}",
+          promptMessages: [{ role: "user", content: "Judge {{input}}" }],
           vars: ["input"],
           provider: null,
           model: null,
@@ -360,6 +391,32 @@ describe("stable evaluators public API", () => {
     });
   });
 
+  it("reads snake-case tool call mappings", () => {
+    expect(
+      toApiReadMappings([
+        {
+          templateVariable: "input",
+          selectedColumnId: "input",
+          jsonSelector: null,
+        },
+        {
+          templateVariable: "output",
+          selectedColumnId: "output",
+          jsonSelector: null,
+        },
+        {
+          templateVariable: "tool_calls",
+          selectedColumnId: "tool_calls",
+          jsonSelector: null,
+        },
+      ]),
+    ).toEqual([
+      { variable: "input", source: "input" },
+      { variable: "output", source: "output" },
+      { variable: "tool_calls", source: "tool_calls" },
+    ]);
+  });
+
   it("returns 404 when getting an invalid evaluator ID", async () => {
     const { auth } = await createOrgProjectAndApiKey();
 
@@ -455,7 +512,7 @@ describe("stable evaluators public API", () => {
         description: null,
         definition: {
           type: EvalTemplateType.LLM_AS_JUDGE,
-          prompt: "Judge {{input}}",
+          promptMessages: [{ role: "user", content: "Judge {{input}}" }],
           vars: ["input"],
           provider: "openai",
           model: "gpt-4.1-mini",
@@ -659,5 +716,78 @@ describe("stable evaluators public API", () => {
       auth,
     );
     expect(response.status).toBe(404);
+  });
+
+  it("rejects patching and deleting a built-in evaluator", async () => {
+    const { auth } = await createOrgProjectAndApiKey();
+    const evaluator = await createCodeEvaluator("built-in evaluator", auth);
+    await prisma.evaluator.update({
+      where: { id: evaluator.body.id },
+      data: { isBuiltIn: true },
+    });
+
+    for (const [method, body] of [
+      [
+        "PATCH",
+        {
+          name: "renamed built-in evaluator",
+          ...codeDefinition("function evaluate() { return { scores: [1] }; }"),
+        },
+      ],
+      ["DELETE", undefined],
+    ] as const) {
+      const response = await makeAPICall(
+        method,
+        `/api/public/v2/evaluators/${evaluator.body.id}`,
+        body,
+        auth,
+      );
+      expect(response.status).toBe(400);
+      expect(PublicApiError.parse(response.body)).toMatchObject({
+        message: "Built-in evaluators cannot be edited",
+      });
+    }
+
+    await expect(
+      prisma.evaluator.findUnique({
+        where: { id: evaluator.body.id },
+        select: { name: true, _count: { select: { versions: true } } },
+      }),
+    ).resolves.toEqual({
+      name: "built-in evaluator",
+      _count: { versions: 1 },
+    });
+  });
+
+  it("returns 404 when patching or deleting a FACET evaluator", async () => {
+    const { auth, project } = await createOrgProjectAndApiKey();
+    const facet = await prisma.evaluator.create({
+      data: {
+        projectId: project.id,
+        name: "internal facet",
+        type: EvalTemplateType.FACET,
+        versions: { create: { version: 1 } },
+      },
+    });
+
+    for (const [method, body] of [
+      ["PATCH", { name: "renamed facet" }],
+      ["DELETE", undefined],
+    ] as const) {
+      const response = await makeAPICall(
+        method,
+        `/api/public/v2/evaluators/${facet.id}`,
+        body,
+        auth,
+      );
+      expect(response.status).toBe(404);
+    }
+
+    await expect(
+      prisma.evaluator.findUnique({
+        where: { id: facet.id },
+        select: { name: true },
+      }),
+    ).resolves.toEqual({ name: "internal facet" });
   });
 });

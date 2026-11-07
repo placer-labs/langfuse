@@ -4,14 +4,27 @@ import {
   authenticatedProcedure,
 } from "@/src/server/api/trpc";
 import { TRPCError } from "@trpc/server";
-import { StringNoHTML } from "@langfuse/shared";
+import { ForbiddenError, StringNoHTML } from "@langfuse/shared";
 import { Role, Prisma, type PrismaClient } from "@langfuse/shared/src/db";
 import { canToggleV4 } from "@/src/features/events/lib/v4Rollout";
 import { V4_PREVIEW_LABEL } from "@/src/features/events/lib/v4PreviewLabel";
 import { env } from "@/src/env.mjs";
-import { getSfdcService } from "@/src/ee/features/sfdc-sync/server";
-import { featurePreviewFlags } from "@/src/features/feature-flags/available-flags";
+import { getSfdcService } from "@/src/ee/features/sfdc-sync/server/sfdcService";
+import {
+  isInternalFeaturePreviewFlag,
+  personalFeaturePreviewFlags,
+  INTERNAL_FEATURE_FLAG,
+} from "@/src/features/feature-flags/available-flags";
 import { setUserFeaturePreview } from "@/src/features/feature-flags/server/organizationFeatureFlags";
+import {
+  hasInternalAccess,
+  isInternalViewEnabled,
+} from "@/src/features/feature-flags/utils";
+import { advanceSessionsExpiredAtForUser } from "@/src/features/auth/lib/sessionExpiration";
+import {
+  deleteUserBoundApiKeys,
+  evictRevokedApiKeys,
+} from "@/src/features/ai-gateway/server/apiKey/userBoundApiKeys";
 
 const updateDisplayNameSchema = z.object({
   name: StringNoHTML.min(1, "Name cannot be empty").max(
@@ -75,6 +88,31 @@ async function checkUserCanBeDeleted(
 }
 
 export const userAccountRouter = createTRPCRouter({
+  setViewMode: authenticatedProcedure
+    .input(z.object({ mode: z.enum(["INTERNAL", "EXTERNAL"]) }))
+    .mutation(async ({ input, ctx }) => {
+      if (
+        input.mode === "INTERNAL" &&
+        !hasInternalAccess({
+          email: ctx.session.user.email,
+          isAdmin: ctx.session.user.admin === true,
+          isExperimentalFeaturesEnabled:
+            env.LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES === "true",
+        })
+      ) {
+        throw new TRPCError({
+          code: "PRECONDITION_FAILED",
+          message: "Internal view is only available to eligible users.",
+        });
+      }
+      await setUserFeaturePreview({
+        prisma: ctx.prisma,
+        userId: ctx.session.user.id,
+        flag: INTERNAL_FEATURE_FLAG,
+        enabled: input.mode === "INTERNAL",
+      });
+      return { success: true };
+    }),
   checkCanDelete: authenticatedProcedure.query(async ({ ctx }) => {
     const userId = ctx.session.user.id;
     return checkUserCanBeDeleted(userId, ctx.prisma);
@@ -98,23 +136,43 @@ export const userAccountRouter = createTRPCRouter({
       };
     }),
 
+  signOutAllSessions: authenticatedProcedure.mutation(async ({ ctx }) => {
+    await advanceSessionsExpiredAtForUser(ctx.session.user.id, ctx.prisma);
+
+    return { success: true };
+  }),
+
   setFeaturePreviewEnabled: authenticatedProcedure
     .input(
       z.object({
         // Allowlist of user-toggleable Feature Preview flags (the Feature
         // Preview modal). Keep in sync with the modal's preview registry.
-        flag: z.enum(featurePreviewFlags),
+        flag: z.enum(personalFeaturePreviewFlags),
         enabled: z.boolean(),
       }),
     )
     .mutation(async ({ input, ctx }) => {
       const userId = ctx.session.user.id;
 
+      if (
+        isInternalFeaturePreviewFlag(input.flag) &&
+        !isInternalViewEnabled(ctx.session) &&
+        !ctx.session.user.featureFlags[input.flag]
+      ) {
+        throw new ForbiddenError(
+          "This feature preview requires Internal view or an existing feature grant.",
+        );
+      }
+
       const canEnableFeaturePreviews =
         Boolean(env.NEXT_PUBLIC_LANGFUSE_CLOUD_REGION) ||
         ctx.session.user.v4BetaEnabled === true;
 
-      if (input.enabled && !canEnableFeaturePreviews) {
+      if (
+        input.enabled &&
+        !isInternalFeaturePreviewFlag(input.flag) &&
+        !canEnableFeaturePreviews
+      ) {
         throw new TRPCError({
           code: "PRECONDITION_FAILED",
           message: `Feature previews require ${V4_PREVIEW_LABEL} on self-hosted deployments.`,
@@ -142,7 +200,7 @@ export const userAccountRouter = createTRPCRouter({
 
     // Wrap check and delete in a serializable transaction to prevent race conditions
     // when organization owners are removed concurrently
-    const sfdcRemovals = await ctx.prisma.$transaction(
+    const { sfdcRemovals, revokedKeys } = await ctx.prisma.$transaction(
       async (tx) => {
         // Verify user can be deleted
         const { canDelete } = await checkUserCanBeDeleted(userId, tx);
@@ -167,20 +225,27 @@ export const userAccountRouter = createTRPCRouter({
           select: { orgId: true },
         });
 
+        const revokedKeys = await deleteUserBoundApiKeys(tx, { userId });
+
         // Delete the user (cascade will handle related records)
         await tx.user.delete({
           where: { id: userId },
         });
 
-        return memberships.map(({ orgId }) => ({
-          orgId,
-          email: user?.email,
-        }));
+        return {
+          sfdcRemovals: memberships.map(({ orgId }) => ({
+            orgId,
+            email: user?.email,
+          })),
+          revokedKeys,
+        };
       },
       {
         isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
       },
     );
+
+    await evictRevokedApiKeys(revokedKeys, { userId });
 
     // SFDC: remove every org-member bridge the cascade just deleted. After
     // commit so a rolled-back delete never desyncs SFDC; removeUser never
@@ -295,7 +360,8 @@ export const userAccountRouter = createTRPCRouter({
         { isLangfuseCloudAdmin: ctx.session.user.admin === true },
       );
 
-      if (!userCanToggleV4) {
+      // Rollout-locked users may recover a missing opt-in, but cannot opt out.
+      if (!userCanToggleV4 && !input.enabled) {
         return {
           success: true,
           v4BetaEnabled: userRolloutState.v4BetaEnabled,
@@ -311,7 +377,7 @@ export const userAccountRouter = createTRPCRouter({
       return {
         success: true,
         v4BetaEnabled: input.enabled,
-        canToggleV4: true,
+        canToggleV4: userCanToggleV4,
       };
     }),
 });

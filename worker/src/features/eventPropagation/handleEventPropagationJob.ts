@@ -11,6 +11,7 @@ import {
 } from "@langfuse/shared/src/server";
 import { Job } from "bullmq";
 import { env } from "../../env";
+import { clickhouseComputesEventBytes } from "../../services/ClickhouseWriter/eventByteAccounting";
 
 const LAST_PROCESSED_PARTITION_KEY =
   "langfuse:event-propagation:last-processed-partition";
@@ -95,6 +96,7 @@ const updateLastProcessedPartition = async (
 export const handleEventPropagationJob = async (
   job: Job<TQueueJobTypes[QueueName.EventPropagationQueue]>,
 ) => {
+  const computeEventBytesInClickhouse = clickhouseComputesEventBytes();
   getCurrentSpan()?.setAttribute(
     "messaging.bullmq.job.input.jobId",
     job.data.id,
@@ -256,7 +258,7 @@ export const handleEventPropagationJob = async (
           metadata_values,
           source,
           blob_storage_file_path,
-          event_bytes,
+          ${computeEventBytesInClickhouse ? "" : "event_bytes,"}
           created_at,
           updated_at,
           event_ts,
@@ -315,7 +317,7 @@ export const handleEventPropagationJob = async (
           mapValues(mapConcat(obs.metadata, coalesce(t.metadata, map()))) AS metadata_values,
           multiIf(mapContains(obs.metadata, 'resourceAttributes'), 'otel-dual-write', 'ingestion-api-dual-write') AS source,
           '' AS blob_storage_file_path,
-          byteSize(*) AS event_bytes,
+          ${computeEventBytesInClickhouse ? "" : "byteSize(*) AS event_bytes,"}
           obs.created_at,
           obs.updated_at,
           obs.event_ts,
@@ -338,13 +340,28 @@ export const handleEventPropagationJob = async (
         ${excludeProjectIdsInClause ? `AND obs.project_id ${excludeProjectIdsInClause}` : ""}
       `,
       clickhouseConfigs: {
-        request_timeout: 600000, // 10 minutes timeout
+        request_timeout: 1_800_000, // 30 minutes timeout
       },
       clickhouseSettings: {
         parallel_view_processing: 1,
         max_insert_threads: String(
           env.LANGFUSE_EVENT_PROPAGATION_MAX_INSERT_THREADS,
         ),
+        ...(env.LANGFUSE_EVENT_PROPAGATION_MAX_BLOCK_SIZE !== undefined && {
+          max_block_size: String(env.LANGFUSE_EVENT_PROPAGATION_MAX_BLOCK_SIZE),
+        }),
+        ...(env.LANGFUSE_EVENT_PROPAGATION_MIN_INSERT_BLOCK_SIZE_ROWS !==
+          undefined && {
+          min_insert_block_size_rows: String(
+            env.LANGFUSE_EVENT_PROPAGATION_MIN_INSERT_BLOCK_SIZE_ROWS,
+          ),
+        }),
+        ...(env.LANGFUSE_EVENT_PROPAGATION_MIN_INSERT_BLOCK_SIZE_BYTES !==
+          undefined && {
+          min_insert_block_size_bytes: String(
+            env.LANGFUSE_EVENT_PROPAGATION_MIN_INSERT_BLOCK_SIZE_BYTES,
+          ),
+        }),
         type_json_skip_duplicated_paths: true,
       },
     });

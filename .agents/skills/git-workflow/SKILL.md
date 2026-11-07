@@ -53,20 +53,17 @@ operations.
 - Use `gh search issues` for GitHub issue search.
 - Prefer non-interactive Git and GitHub commands where possible.
 - Keep PRs narrow enough to review without unrelated refactors.
+- When a change is too large for one reviewable PR, split it into a chained
+  stack of small PRs instead of widening one.
 - Open PRs as reviewable, not as drafts, unless a human asks for a draft.
+- Cursor agents apply the GitHub `cursor` label after opening a PR; see
+  `cursor-agents-workflow`. Do not leave that tag for a human.
 - Do not post GitHub PR comments as the human author. Cursor agents that
   comment as Cursor should leave one last comment with proof of user-visible
   work (screenshot, video, or before/after on the PR, not only in chat) and
   what to doubt in review; see `cursor-agents-workflow`. Claude Code and
   other tools that comment as the user must skip that comment.
-- Claude, Greptile, or Codex review comments (`claude[bot]`, Claude Code,
-  security-review action, `greptile-apps[bot]`,
-  `chatgpt-codex-connector[bot]`): do not reply. Keep the thread open until
-  you apply the fix and resolve it, or skip it because you are sure, tell
-  the human in plain language (and invite them to doubt that skip), then
-  resolve it. Do not post `@claude review` again unless a human asks for
-  another pass. Human reviewer comments stay open and may need a real
-  reply.
+- Claude, Greptile, or Codex review comments (`claude[bot]`, Claude Code, security-review action, `greptile-apps[bot]`, `chatgpt-codex-connector[bot]`): after the fix commit is pushed, resolve each thread you fixed or deliberately skipped. Skip a finding only when you are sure it is wrong, tell the human in plain language, invite them to doubt that skip, then resolve it. That resolve is part of finishing the task, and it counts as the requested action even when the prompt only says to fix, address, or reply and never says resolve. Use the GraphQL `resolveReviewThread` mutation; unresolved threads block merge. If the task asked for a reply, post that reply and then resolve; resolving does not replace the reply. Do not post `@claude review` again unless a human asks for another pass. Human reviewer threads stay open and may need a real reply.
 
 ## Release
 
@@ -90,5 +87,8 @@ operations.
   or the GitHub "Latest release" badge. At the next major GA (v5), repeat
   the flip: move the gate to `refs/tags/v5` on `main`, then disable it and
   set `makeLatest: false` on the new `v4` maintenance branch.
+- The ECS deployment workflow includes `ai-gateway` only for staging: pushes
+  to `main` and manual staging deployments. Its image builds from `ai-gateway/`
+  with `BUILD_ID` set to the commit SHA; production deployments exclude it.
 - Do not change release/versioning flow without updating this skill and the
   impacted package guides.

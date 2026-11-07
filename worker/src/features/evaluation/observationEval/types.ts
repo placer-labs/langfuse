@@ -8,7 +8,12 @@ import {
   JobExecutionStatus,
 } from "@langfuse/shared/src/db";
 import { type EvalExecutionMode } from "@langfuse/shared";
-import type { EvalTargetObject, FilterState } from "@langfuse/shared";
+import type {
+  EvalTargetObject,
+  FilterState,
+  ObservationVariableMapping,
+  TopicsTargetObject,
+} from "@langfuse/shared";
 
 /**
  * Re-export ObservationForEval as the canonical observation type for eval operations.
@@ -66,6 +71,14 @@ export type EvaluationRuleWithAssignments = Pick<
   assignments: ObservationEvalAssignment[];
 };
 
+export type TraceTranscriptEvalRule = Omit<
+  EvaluationRuleWithAssignments,
+  "targetObject" | "ruleId"
+> & {
+  targetObject: typeof TopicsTargetObject;
+  ruleId: string;
+};
+
 /**
  * What the scheduler matches an observation against: an evaluation rule, or
  * the legacy job configuration it replaced (still reachable through manual
@@ -114,5 +127,12 @@ export interface ObservationEvalSchedulerDeps {
     /** Evaluator v2 identity; omitted when scheduling a legacy config. */
     evaluatorId?: string;
     evaluationRuleId?: string;
+    /**
+     * Mapping override for a ruleless batch run. Omitted to inherit the
+     * evaluator version mapping.
+     */
+    variableMapping?: ObservationVariableMapping[];
+    /** Batch action of a manual batch run; omitted for live ingestion. */
+    batchActionId?: string;
   }) => Promise<void>;
 }

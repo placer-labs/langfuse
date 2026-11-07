@@ -1,3 +1,4 @@
+/* eslint-disable @repo/prefer-stories-over-client-tests */
 import { fireEvent, render, screen } from "@testing-library/react";
 import { EvalTemplateTypeEnum } from "@langfuse/shared";
 
@@ -12,7 +13,7 @@ const currentVersion = {
   type: EvalTemplateTypeEnum.LLM_AS_JUDGE,
   sourceCode: null,
   sourceCodeLanguage: null,
-  prompt: "Current prompt",
+  promptMessages: [{ role: "user" as const, content: "Current prompt" }],
   provider: "openai",
   model: "gpt-4.1-mini",
   modelParams: null,
@@ -26,7 +27,7 @@ const oldVersion = {
   ...currentVersion,
   id: "version-1",
   version: 1,
-  prompt: "Old prompt",
+  promptMessages: [{ role: "user" as const, content: "Old prompt" }],
 };
 
 describe("EvaluatorVersionHistorySheet", () => {
@@ -55,7 +56,7 @@ describe("EvaluatorVersionHistorySheet", () => {
     );
 
     expect(screen.getByText("Version 1").parentElement).toHaveClass(
-      "items-baseline",
+      "items-center",
     );
     expect(
       screen.queryByRole("button", { name: "Restore version 2" }),

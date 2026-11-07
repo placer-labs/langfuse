@@ -1,72 +1,68 @@
-/**
- * Tooltip-based metadata badges for ObservationDetailView
- * These badges use BreakdownTooltip to show detailed cost/usage information
- */
+/* eslint-disable @repo/component-file-structure, @typescript-eslint/no-use-before-define */
+/** Cost and token metrics for the trace, observation and session headers; breakdowns open on hover. */
 
-import { type ObservationType, isGenerationLike } from "@langfuse/shared";
-import { Badge, BadgeShell } from "@/src/components/design-system/Badge/Badge";
+import { Metric } from "@/src/components/design-system/Metric/Metric";
+import { UsageCostWarningBadge } from "@/src/features/traces/components/UsageCostWarningBadge";
 import {
   BreakdownTooltip,
+  type CostSource,
   type PriceSource,
 } from "@/src/features/traces/components/BreakdownTooltip";
-import { usdFormatter, formatTokenCounts } from "@/src/utils/numbers";
-import { InfoIcon } from "lucide-react";
+import { compactNumberFormatter, usdFormatter } from "@/src/utils/numbers";
 
-export function CostBadge({
-  totalCost,
-  costDetails,
-  priceSource,
-}: {
-  totalCost: number | null;
-  costDetails: Record<string, number> | undefined;
-  priceSource?: PriceSource;
-}) {
-  // Don't show if no cost data. Explicit 0 is a real value and should render.
-  if (totalCost == null || !costDetails) return null;
+/** Header cost: short, with the exact value on hover. */
+export const formatMetricCost = (cost: number) => usdFormatter(cost, 2, 3);
 
+/** Header tokens, e.g. "21k tokens". */
+export const formatMetricTokens = (tokens: number) =>
+  `${compactNumberFormatter(tokens, 0).toLowerCase()} tokens`;
+
+type CostBadgeProps =
+  | {
+      variant?: "cost";
+      totalCost: number;
+      costDetails: Record<string, number>;
+      priceSource?: PriceSource;
+      costSource?: CostSource;
+    }
+  /** A generation nothing priced; the tooltip differs when no usage was sent either. */
+  | { variant: "missing"; projectId: string; hasUsage: boolean };
+
+export function CostBadge(props: CostBadgeProps) {
+  if (props.variant === "missing") {
+    return (
+      <UsageCostWarningBadge
+        projectId={props.projectId}
+        label="no cost"
+        description={
+          props.hasUsage
+            ? "No model price matched this generation. Add a model definition, or submit costs directly."
+            : "No token usage or cost was submitted for this generation. Send token usage and a model name, or submit costs directly."
+        }
+      />
+    );
+  }
+  const { totalCost, costDetails, priceSource, costSource } = props;
+  if (!hasBreakdown(costDetails)) {
+    return (
+      <Metric
+        value={formatMetricCost(totalCost)}
+        title={`exact $${totalCost.toFixed(6)}`}
+      />
+    );
+  }
   return (
     <BreakdownTooltip
       details={costDetails}
       isCost={true}
       priceSource={priceSource}
+      costSource={costSource}
     >
-      <Badge text={usdFormatter(totalCost)} trailingIcon={InfoIcon} />
+      <Metric interactive value={formatMetricCost(totalCost)} />
     </BreakdownTooltip>
   );
 }
 
-export function UsageBadge({
-  type,
-  inputUsage,
-  outputUsage,
-  totalUsage,
-  usageDetails,
-}: {
-  type: ObservationType;
-  inputUsage: number;
-  outputUsage: number;
-  totalUsage: number;
-  usageDetails: Record<string, number> | undefined;
-}) {
-  // Only show for generation-like observations
-  if (!isGenerationLike(type) || !usageDetails) return null;
-
-  const tokenText = formatTokenCounts(
-    inputUsage,
-    outputUsage,
-    totalUsage,
-    true,
-  );
-
-  return (
-    <BreakdownTooltip details={usageDetails} isCost={false}>
-      {tokenText ? (
-        <Badge text={tokenText} trailingIcon={InfoIcon} />
-      ) : (
-        <BadgeShell aria-label="View usage breakdown">
-          <InfoIcon aria-hidden className="size-3" />
-        </BadgeShell>
-      )}
-    </BreakdownTooltip>
-  );
-}
+/** A breakdown of nothing but zeros has nothing to say. */
+export const hasBreakdown = (details: Record<string, number>) =>
+  Object.values(details).some((value) => value > 0);

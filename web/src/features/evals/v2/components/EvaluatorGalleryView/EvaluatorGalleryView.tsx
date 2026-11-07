@@ -1,10 +1,9 @@
-import type { RefObject } from "react";
-import { Code2, Search, Sparkles } from "lucide-react";
-import { EvalTemplateTypeEnum, type EvalTemplateType } from "@langfuse/shared";
+/* eslint-disable no-nested-ternary */
+import { useCallback, type RefObject } from "react";
+import type { EvalTemplateType } from "@langfuse/shared";
 
-import { Button } from "@/src/components/ui/button";
-import { Input } from "@/src/components/ui/input";
 import { Skeleton } from "@/src/components/ui/skeleton";
+import { EvaluatorGalleryStartRow } from "./components/EvaluatorGalleryStartRow/EvaluatorGalleryStartRow";
 import { EvaluatorGallerySection } from "./components/EvaluatorGallerySection/EvaluatorGallerySection";
 import { EvaluatorGallerySidebar } from "./components/EvaluatorGallerySidebar/EvaluatorGallerySidebar";
 import type {
@@ -12,7 +11,10 @@ import type {
   GalleryNavigationItem,
   GallerySection,
 } from "../../types/templateGallery";
-import { EVALUATOR_GALLERY_ALL_SECTION_KEY } from "../../constants/evaluatorGallery";
+import {
+  EVALUATOR_GALLERY_ALL_SECTION_KEY,
+  EVALUATOR_GALLERY_PROJECT_SECTION_KEY,
+} from "../../constants/evaluatorGallery";
 import {
   gallerySidebarItems,
   visibleGallerySections,
@@ -34,7 +36,6 @@ function GallerySkeleton() {
 export function EvaluatorGalleryView({
   search,
   onSearchChange,
-  searchInputRef,
   navigationItems,
   activeSection,
   onSelectSection,
@@ -45,21 +46,26 @@ export function EvaluatorGalleryView({
   onCreateFromScratch,
   scrollContainerRef,
   isLoading,
+  hasMoreProjectTemplates = false,
+  isLoadingMoreProjectTemplates = false,
+  onLoadMoreProjectTemplates,
   errorMessage,
 }: {
   search: string;
   onSearchChange: (search: string) => void;
-  searchInputRef?: RefObject<HTMLInputElement | null>;
   navigationItems: GalleryNavigationItem[];
   activeSection: string | null;
   onSelectSection: (key: string) => void;
   sections: GallerySection[];
   expandedSections: ReadonlySet<string>;
   onExpandedChange: (key: string, expanded: boolean) => void;
-  onSelectTemplate: (template: GalleryTemplate) => void;
+  onSelectTemplate: (template: GalleryTemplate, sectionKey: string) => void;
   onCreateFromScratch: (type: EvalTemplateType) => void;
   scrollContainerRef?: RefObject<HTMLDivElement | null>;
   isLoading: boolean;
+  hasMoreProjectTemplates?: boolean;
+  isLoadingMoreProjectTemplates?: boolean;
+  onLoadMoreProjectTemplates?: () => void;
   errorMessage?: string;
 }) {
   const sidebarItems = gallerySidebarItems(navigationItems, sections);
@@ -69,7 +75,47 @@ export function EvaluatorGalleryView({
       ? activeSection
       : EVALUATOR_GALLERY_ALL_SECTION_KEY;
   const displayedSections = visibleGallerySections(sections, resolvedSection);
-  const hasTemplates = displayedSections.length > 0;
+  const hasTemplates = displayedSections.some(
+    (section) => section.templates.length > 0,
+  );
+  const isSingleSection = resolvedSection !== EVALUATOR_GALLERY_ALL_SECTION_KEY;
+  const selectSection = (key: string) => {
+    if (key !== resolvedSection) onSearchChange("");
+    onSelectSection(key);
+  };
+  const loadMoreSentinelRef = useCallback(
+    (sentinel: HTMLDivElement | null) => {
+      if (
+        !sentinel ||
+        !hasMoreProjectTemplates ||
+        isLoadingMoreProjectTemplates ||
+        !onLoadMoreProjectTemplates
+      ) {
+        return;
+      }
+
+      const observer = new IntersectionObserver(
+        ([entry]) => {
+          if (entry?.isIntersecting) {
+            observer.disconnect();
+            onLoadMoreProjectTemplates();
+          }
+        },
+        { root: scrollContainerRef?.current, rootMargin: "200px 0px" },
+      );
+      observer.observe(sentinel);
+      return () => observer.disconnect();
+    },
+    [
+      hasMoreProjectTemplates,
+      isLoadingMoreProjectTemplates,
+      onLoadMoreProjectTemplates,
+      scrollContainerRef,
+    ],
+  );
+  const shouldLoadMoreProjectTemplates =
+    resolvedSection === EVALUATOR_GALLERY_PROJECT_SECTION_KEY &&
+    (hasMoreProjectTemplates || isLoadingMoreProjectTemplates);
 
   return (
     <div className="@container flex flex-1 flex-col overflow-hidden">
@@ -78,56 +124,25 @@ export function EvaluatorGalleryView({
           <EvaluatorGallerySidebar
             items={sidebarItems}
             activeSection={resolvedSection}
-            onSelectSection={(key) => {
-              if (key !== resolvedSection) onSearchChange("");
-              onSelectSection(key);
-            }}
+            onSelectSection={selectSection}
+            search={search}
+            onSearchChange={onSearchChange}
           />
         ) : (
           <div aria-hidden="true" className="w-56 shrink-0 border-r" />
         )}
 
-        <div className="@container flex min-w-0 flex-1 flex-col overflow-hidden">
+        <div className="bg-surface-sunken @container flex min-w-0 flex-1 flex-col overflow-hidden">
           <div
             ref={scrollContainerRef}
             className="min-h-0 flex-1 overflow-y-auto"
           >
-            <div className="bg-modal sticky top-0 z-10 flex flex-col items-stretch gap-2 border-b px-4 py-3 @2xl:flex-row @2xl:items-center">
-              <div className="relative min-w-0 flex-1">
-                <Search className="text-muted-foreground absolute top-1/2 left-2 h-4 w-4 -translate-y-1/2" />
-                <Input
-                  ref={searchInputRef}
-                  value={search}
-                  onChange={(event) => onSearchChange(event.target.value)}
-                  placeholder="Search what you want to measure."
-                  className="pl-8"
+            <div className="flex flex-col gap-12 px-4 py-4">
+              {!isSingleSection && (!search.trim() || !hasTemplates) ? (
+                <EvaluatorGalleryStartRow
+                  onCreateFromScratch={onCreateFromScratch}
                 />
-              </div>
-              <div className="flex flex-col gap-2 @sm:flex-row">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  className="flex-1 shrink-0 gap-1.5 @2xl:flex-none"
-                  onClick={() =>
-                    onCreateFromScratch(EvalTemplateTypeEnum.LLM_AS_JUDGE)
-                  }
-                >
-                  <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
-                  New LLM-as-a-judge
-                </Button>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  className="flex-1 shrink-0 gap-1.5 @2xl:flex-none"
-                  onClick={() => onCreateFromScratch(EvalTemplateTypeEnum.CODE)}
-                >
-                  <Code2 className="h-3.5 w-3.5" aria-hidden="true" />
-                  New code evaluator
-                </Button>
-              </div>
-            </div>
-
-            <div className="flex flex-col gap-10 px-4 py-4">
+              ) : null}
               {isLoading ? <GallerySkeleton /> : null}
               {errorMessage ? (
                 <div className="text-destructive py-8 text-center text-sm">
@@ -140,9 +155,23 @@ export function EvaluatorGalleryView({
                     <EvaluatorGallerySection
                       key={section.key}
                       section={section}
-                      expanded={expandedSections.has(section.key)}
-                      onExpandedChange={(expanded) =>
-                        onExpandedChange(section.key, expanded)
+                      expanded={
+                        isSingleSection || expandedSections.has(section.key)
+                      }
+                      onExpandedChange={
+                        isSingleSection
+                          ? undefined
+                          : (expanded) => {
+                              if (
+                                expanded &&
+                                section.key ===
+                                  EVALUATOR_GALLERY_PROJECT_SECTION_KEY
+                              ) {
+                                selectSection(section.key);
+                                return;
+                              }
+                              onExpandedChange(section.key, expanded);
+                            }
                       }
                       onSelectTemplate={onSelectTemplate}
                     />
@@ -152,6 +181,19 @@ export function EvaluatorGalleryView({
                     No templates match your search.
                   </div>
                 )
+              ) : null}
+              {shouldLoadMoreProjectTemplates ? (
+                <div
+                  ref={
+                    hasMoreProjectTemplates ? loadMoreSentinelRef : undefined
+                  }
+                  className="text-muted-foreground py-2 text-center text-sm"
+                  role={isLoadingMoreProjectTemplates ? "status" : undefined}
+                >
+                  {isLoadingMoreProjectTemplates
+                    ? "Loading more templates…"
+                    : null}
+                </div>
               ) : null}
             </div>
           </div>

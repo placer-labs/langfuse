@@ -1,15 +1,21 @@
 // This structure is maintained to relate the frontend table definitions with the clickhouse table definitions.
 // The frontend only sends the column names to the backend. This needs to be changed in the future to send column IDs.
 
-import { UiColumnMappings } from "../../tableDefinitions";
-import { EvalExecutionMetadataKey } from "../../features/evals/evalExecutionMetadata";
+import { UiColumnMappings } from "../../tableDefinitions/types";
 import {
   eventsTableHasParentObservationSql,
   eventsTableIsRootObservationSql,
   eventsTableHasInputSql,
   eventsTableHasOutputSql,
+  eventsTableCachedInputCostSql,
+  eventsTableCachedInputTokensSql,
   eventsTableTraceNameSql,
+  eventsTableLoadedSkillNamesSql,
+  eventsTableLoadedSkillVersionsSql,
+  eventsTableAvailableSkillNamesSql,
+  eventsTableAvailableSkillVersionsSql,
 } from "../../eventsTable";
+import { tokenCountFilterClickhouseType } from "./tokenCountFilterType";
 
 export const eventsTableNativeUiColumnDefinitions: UiColumnMappings = [
   {
@@ -117,6 +123,12 @@ export const eventsTableNativeUiColumnDefinitions: UiColumnMappings = [
       "arraySum(mapValues(mapFilter(x -> positionCaseInsensitive(x.1, 'input') > 0, cost_details)))",
   },
   {
+    uiTableName: "Cached Input Cost ($)",
+    uiTableId: "cachedInputCost",
+    clickhouseTableName: "events_proto",
+    clickhouseSelect: eventsTableCachedInputCostSql,
+  },
+  {
     uiTableName: "Output Cost ($)",
     uiTableId: "outputCost",
     clickhouseTableName: "events_proto",
@@ -168,7 +180,14 @@ export const eventsTableNativeUiColumnDefinitions: UiColumnMappings = [
     clickhouseTableName: "events_proto",
     clickhouseSelect:
       "arraySum(mapValues(mapFilter(x -> positionCaseInsensitive(x.1, 'input') > 0, usage_details)))",
-    clickhouseTypeOverwrite: "Decimal64(3)",
+    clickhouseTypeOverwrite: tokenCountFilterClickhouseType,
+  },
+  {
+    uiTableName: "Cached Input Tokens",
+    uiTableId: "cachedInputTokens",
+    clickhouseTableName: "events_proto",
+    clickhouseSelect: eventsTableCachedInputTokensSql,
+    clickhouseTypeOverwrite: tokenCountFilterClickhouseType,
   },
   {
     uiTableName: "Output Tokens",
@@ -176,7 +195,7 @@ export const eventsTableNativeUiColumnDefinitions: UiColumnMappings = [
     clickhouseTableName: "events_proto",
     clickhouseSelect:
       "arraySum(mapValues(mapFilter(x -> positionCaseInsensitive(x.1, 'output') > 0, usage_details)))",
-    clickhouseTypeOverwrite: "Decimal64(3)",
+    clickhouseTypeOverwrite: tokenCountFilterClickhouseType,
   },
   {
     uiTableName: "Total Tokens",
@@ -184,7 +203,7 @@ export const eventsTableNativeUiColumnDefinitions: UiColumnMappings = [
     clickhouseTableName: "events_proto",
     clickhouseSelect:
       "if(mapExists((k, v) -> (k = 'total'), usage_details), usage_details['total'], NULL)",
-    clickhouseTypeOverwrite: "Decimal64(3)",
+    clickhouseTypeOverwrite: tokenCountFilterClickhouseType,
   },
   {
     uiTableName: "Tokens",
@@ -192,7 +211,7 @@ export const eventsTableNativeUiColumnDefinitions: UiColumnMappings = [
     clickhouseTableName: "events_proto",
     clickhouseSelect:
       "if(mapExists((k, v) -> (k = 'total'), usage_details), usage_details['total'], NULL)",
-    clickhouseTypeOverwrite: "Decimal64(3)",
+    clickhouseTypeOverwrite: tokenCountFilterClickhouseType,
   },
   {
     uiTableName: "Metadata",
@@ -205,13 +224,13 @@ export const eventsTableNativeUiColumnDefinitions: UiColumnMappings = [
     uiTableName: "Evaluator ID",
     uiTableId: "evaluatorId",
     clickhouseTableName: "events_proto",
-    clickhouseSelect: `arrayElement(e.metadata_values, indexOf(e.metadata_names, '${EvalExecutionMetadataKey.EVALUATOR_ID}'))`,
+    clickhouseSelect: "e.evaluator_id",
   },
   {
     uiTableName: "Rule ID",
     uiTableId: "ruleId",
     clickhouseTableName: "events_proto",
-    clickhouseSelect: `if(notEmpty(arrayElement(e.metadata_values, indexOf(e.metadata_names, '${EvalExecutionMetadataKey.EVALUATION_RULE_ID}'))), arrayElement(e.metadata_values, indexOf(e.metadata_names, '${EvalExecutionMetadataKey.EVALUATION_RULE_ID}')), arrayElement(e.metadata_values, indexOf(e.metadata_names, '${EvalExecutionMetadataKey.JOB_CONFIGURATION_ID}')))`,
+    clickhouseSelect: "e.evaluation_rule_id",
   },
   {
     uiTableName: "Version",
@@ -359,6 +378,50 @@ export const eventsTableNativeUiColumnDefinitions: UiColumnMappings = [
     uiTableId: "toolCalls",
     clickhouseTableName: "events_proto",
     clickhouseSelect: "length(e.tool_calls)",
+  },
+  {
+    uiTableName: "Loaded Skill Names",
+    uiTableId: "skillsNamesLoaded",
+    clickhouseTableName: "events_proto",
+    clickhouseSelect: eventsTableLoadedSkillNamesSql,
+  },
+  {
+    uiTableName: "Loaded Skill Versions",
+    uiTableId: "skillsVersionsLoaded",
+    clickhouseTableName: "events_proto",
+    clickhouseSelect: eventsTableLoadedSkillVersionsSql,
+  },
+  {
+    uiTableName: "Loaded Skill Files",
+    uiTableId: "skillFilesLoaded",
+    clickhouseTableName: "events_proto",
+    // Pair each path with its immutable skill-version ID to keep matches within one loaded resource.
+    clickhouseSelect:
+      "arrayMap(skill -> concat(skill.langfuseSkillId, '/', skill.filePath), e.skills_resource_loaded)",
+  },
+  {
+    uiTableName: "Available Skill Names",
+    uiTableId: "skillNamesAvailable",
+    clickhouseTableName: "events_proto",
+    clickhouseSelect: eventsTableAvailableSkillNamesSql,
+  },
+  {
+    uiTableName: "Available Skill Versions",
+    uiTableId: "skillVersionsAvailable",
+    clickhouseTableName: "events_proto",
+    clickhouseSelect: eventsTableAvailableSkillVersionsSql,
+  },
+  {
+    uiTableName: "Skill Names",
+    uiTableId: "skillNames",
+    clickhouseTableName: "events_proto",
+    clickhouseSelect: `arrayConcat(${eventsTableLoadedSkillNamesSql}, ${eventsTableAvailableSkillNamesSql})`,
+  },
+  {
+    uiTableName: "Skill Versions",
+    uiTableId: "skillVersions",
+    clickhouseTableName: "events_proto",
+    clickhouseSelect: `arrayConcat(${eventsTableLoadedSkillVersionsSql}, ${eventsTableAvailableSkillVersionsSql})`,
   },
   {
     uiTableName: "Tool Names",

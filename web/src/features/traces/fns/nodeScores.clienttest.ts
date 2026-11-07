@@ -1,6 +1,10 @@
 // @vitest-environment node
 
-import { selectNodeScores, traceLevelScoreOwnerIds } from "./nodeScores";
+import {
+  selectNodeCorrections,
+  selectNodeScores,
+  traceLevelScoreOwnerIds,
+} from "./nodeScores";
 
 const roots = (
   ...nodes: { id: string; type: "TRACE" | "SPAN" }[]
@@ -61,14 +65,36 @@ describe("traceLevelScoreOwnerIds", () => {
 });
 
 describe("selectNodeScores", () => {
-  const ownerIds = traceLevelScoreOwnerIds(roots({ id: "root", type: "SPAN" }));
+  it("gives every node its own scores only, trace-level scores to none", () => {
+    expect(selectNodeScores(scores, "root").map((s) => s.id)).toEqual([
+      "root-level",
+    ]);
+    expect(selectNodeScores(scores, "child").map((s) => s.id)).toEqual([
+      "child-level",
+    ]);
+  });
+});
 
-  it("adds trace-level scores to the owner once and leaves other nodes alone", () => {
-    expect(selectNodeScores(scores, "root", ownerIds).map((s) => s.id)).toEqual(
-      ["trace-level", "root-level"],
+describe("selectNodeCorrections", () => {
+  const corrections = [
+    { id: "trace-corr", observationId: null },
+    { id: "root-corr", observationId: "root" },
+    { id: "child-corr", observationId: "child" },
+  ];
+
+  it("keeps observation-scoped corrections on that node only", () => {
+    expect(selectNodeCorrections(corrections, "root").map((c) => c.id)).toEqual(
+      ["root-corr"],
     );
     expect(
-      selectNodeScores(scores, "child", ownerIds).map((s) => s.id),
-    ).toEqual(["child-level"]);
+      selectNodeCorrections(corrections, "child").map((c) => c.id),
+    ).toEqual(["child-corr"]);
+  });
+
+  it("never returns null-observationId corrections for any node", () => {
+    expect(selectNodeCorrections(corrections, "root")).not.toContainEqual(
+      expect.objectContaining({ id: "trace-corr" }),
+    );
+    expect(selectNodeCorrections(corrections, "child").length).toBe(1);
   });
 });

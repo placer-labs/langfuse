@@ -16,9 +16,15 @@ const managedTemplate = {
   icon: "gauge",
   description: "Assess whether the answer directly addresses the question.",
   maintainer: "langfuse",
+  previewScores: [{ name: "answer_relevance", value: "Relevant" }],
   evaluator: {
     type: EvalTemplateTypeEnum.LLM_AS_JUDGE,
-    prompt: "Rate the relevance of {{generation}} to {{query}}.",
+    promptMessages: [
+      {
+        role: "user",
+        content: "Rate the relevance of {{generation}} to {{query}}.",
+      },
+    ],
     variables: [{ name: "query", defaultMapping: { field: "input" } }],
     outputDefinition: {
       dataType: "NUMERIC",
@@ -37,7 +43,6 @@ export const CustomCodeEvaluator = meta.story({
       id: "evaluator-1",
       name: "Very long project evaluator name that truncates gracefully",
       type: EvalTemplateTypeEnum.CODE,
-      prompt: null,
       sourceCodeLanguage: EvalTemplateSourceCodeLanguageEnum.PYTHON,
       updatedAt: new Date("2026-07-01"),
       version: 2,

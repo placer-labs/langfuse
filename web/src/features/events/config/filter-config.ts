@@ -4,7 +4,7 @@ import {
   type FilterConfig,
 } from "@/src/features/filters/lib/filter-config";
 import { renderFilterIcon } from "@/src/components/ItemBadge";
-import { renderLevelIcon } from "@/src/components/level-colors";
+import { renderLevelIcon } from "@/src/components/ObservationLevelTag";
 
 // Helper function to get column name from eventsTableCols by ID
 export const getEventsColumnName = (id: string): string => {
@@ -247,6 +247,13 @@ export const observationEventsFilterConfig: FilterConfig = {
     },
     {
       type: "numeric" as const,
+      column: "cachedInputTokens",
+      label: getEventsColumnName("cachedInputTokens"),
+      min: 0,
+      max: 1000000,
+    },
+    {
+      type: "numeric" as const,
       column: "outputTokens",
       label: getEventsColumnName("outputTokens"),
       min: 0,
@@ -263,6 +270,14 @@ export const observationEventsFilterConfig: FilterConfig = {
       type: "numeric" as const,
       column: "inputCost",
       label: getEventsColumnName("inputCost"),
+      min: 0,
+      max: 100,
+      unit: "$",
+    },
+    {
+      type: "numeric" as const,
+      column: "cachedInputCost",
+      label: getEventsColumnName("cachedInputCost"),
       min: 0,
       max: 100,
       unit: "$",
@@ -292,6 +307,16 @@ export const observationEventsFilterConfig: FilterConfig = {
       type: "categorical" as const,
       column: "calledToolNames",
       label: "Tool Names (Called)",
+    },
+    {
+      type: "categorical" as const,
+      column: "skillNamesAvailable",
+      label: "Skill Names (Available)",
+    },
+    {
+      type: "categorical" as const,
+      column: "skillsNamesLoaded",
+      label: "Skill Names (Loaded)",
     },
     {
       type: "numeric" as const,
