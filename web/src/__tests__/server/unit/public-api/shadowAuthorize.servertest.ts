@@ -90,6 +90,37 @@ describe("shadowAuthorize", () => {
     ).toEqual({ success: true });
   });
 
+  it.each([
+    [PRJ, true],
+    ["prj_other", false],
+  ])(
+    "scopes a user principal to the org that owns %s (allowed: %s)",
+    (projectId, allowed) => {
+      const ctx: AuthorizationContext = {
+        principal: {
+          kind: "user",
+          userId: "user_1",
+          organizations: [
+            {
+              orgId: ORG,
+              organizationCreatedAt: "2026-01-01T00:00:00.000Z",
+              plan: "oss",
+              rateLimitOverrides: [],
+              projectIds: [PRJ],
+              isIngestionSuspended: false,
+            },
+          ],
+        },
+        policies: [allowPrompts],
+      };
+      const decision = shadowAuthorize({
+        ...params("prompts:read", ctx),
+        resource: { projectId },
+      });
+      expect(decision.success).toBe(allowed);
+    },
+  );
+
   it("passes an ungated item", () => {
     expect(
       shadowAuthorize(params(__dangerouslySkipAuthz, authContext([]))),

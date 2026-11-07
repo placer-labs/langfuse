@@ -164,10 +164,22 @@ function logAuditEvent(
   );
 }
 
+// placer-labs fork: MCP requests authenticated by OIDC carry this synthetic
+// api key id prefix in front of the real user id.
+export const OIDC_API_KEY_ID_PREFIX = "oidc:";
+
 export async function auditLog(
   log: AuditLog,
   prisma?: typeof _prisma | Prisma.TransactionClient,
 ) {
+  if ("apiKeyId" in log && log.apiKeyId.startsWith(OIDC_API_KEY_ID_PREFIX)) {
+    const { apiKeyId, ...rest } = log;
+    return auditLog(
+      { ...rest, userId: apiKeyId.slice(OIDC_API_KEY_ID_PREFIX.length) },
+      prisma,
+    );
+  }
+
   // Audit log records are an enterprise feature, so they are only persisted
   // when the instance is licensed for them. logAuditEvent below is deliberately
   // NOT gated: it is operator telemetry rather than the audited record itself
