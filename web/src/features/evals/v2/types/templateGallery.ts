@@ -1,16 +1,17 @@
-import type { LucideIcon } from "lucide-react";
 import type {
+  DecisionModelQuestions,
   EvalTemplateSourceCodeLanguage,
   EvalTemplateType,
+  EvaluatorPromptMessage,
   PersistedEvalOutputDefinition,
 } from "@langfuse/shared";
 
-import type { EvaluatorDefinition } from "@/src/features/evals/v2/server/evaluators/evaluatorTypes";
+import type { NormalizedEvaluatorDefinition } from "@/src/features/evals/v2/server/evaluators/evaluatorTypes";
 
 export type EvaluatorSetupDraft = {
   name: string;
   description: string | null;
-  definition: EvaluatorDefinition;
+  definition: NormalizedEvaluatorDefinition;
 };
 
 export type ManagedTemplate = {
@@ -20,10 +21,12 @@ export type ManagedTemplate = {
   icon: string;
   description: string;
   maintainer: string;
+  /** Sample scores shown on the gallery card, as `name: value` chips. */
+  previewScores: Array<{ name: string; value: string }>;
   evaluator:
     | {
         type: Extract<EvalTemplateType, "LLM_AS_JUDGE">;
-        prompt: string;
+        promptMessages: EvaluatorPromptMessage[];
         variables: Array<{
           name: string;
           defaultMapping: { field: string };
@@ -34,6 +37,11 @@ export type ManagedTemplate = {
         type: Extract<EvalTemplateType, "CODE">;
         language: EvalTemplateSourceCodeLanguage;
         source: string;
+      }
+    | {
+        type: Extract<EvalTemplateType, "DECISION_MODEL">;
+        questions: DecisionModelQuestions;
+        state: Array<{ key: string; defaultMapping: { field: string } }>;
       };
 };
 
@@ -43,7 +51,6 @@ export type CustomEvaluatorTemplate = {
   name: string;
   description?: string | null;
   type: EvalTemplateType;
-  prompt: string | null;
   sourceCodeLanguage?: EvalTemplateSourceCodeLanguage | null;
   updatedAt: Date;
   version: number;
@@ -63,7 +70,6 @@ export type GalleryTemplate =
 export type GalleryNavigationItem = {
   key: string;
   label: string;
-  icon?: LucideIcon;
   count?: number;
 };
 

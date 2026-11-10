@@ -1,15 +1,16 @@
 import { randomUUID } from "crypto";
-import { getCodeEvalVariableMapping, LLMAdapter } from "@langfuse/shared";
+import {
+  getCodeEvalVariableMapping,
+  LLMAdapter,
+  type FilterState,
+} from "@langfuse/shared";
 import { encrypt } from "@langfuse/shared/encryption";
 import { Prisma, prisma } from "@langfuse/shared/src/db";
 import { createOrgProjectAndApiKey } from "@langfuse/shared/src/server";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import * as evaluatorRepository from "@/src/features/evals/v2/server/evaluators/evaluatorRepository";
 import { EvaluatorVersionConflictError } from "@/src/features/evals/v2/server/evaluators/evaluatorErrors";
-import type {
-  EvaluatorDefinition,
-  EvaluatorDefinitionForPersistence,
-} from "@/src/features/evals/v2/server/evaluators/evaluatorTypes";
+import type { EvaluatorDefinitionForPersistence } from "@/src/features/evals/v2/server/evaluators/evaluatorTypes";
 
 const orgIds: string[] = [];
 let projectId = "";
@@ -27,11 +28,12 @@ const codeDefinition = (
 
 const llmDefinition = (
   overrides: Partial<
-    Extract<EvaluatorDefinition, { type: "LLM_AS_JUDGE" }>
+    Extract<EvaluatorDefinitionForPersistence, { type: "LLM_AS_JUDGE" }>
   > = {},
-): Extract<EvaluatorDefinition, { type: "LLM_AS_JUDGE" }> => ({
+): Extract<EvaluatorDefinitionForPersistence, { type: "LLM_AS_JUDGE" }> => ({
   type: "LLM_AS_JUDGE",
   prompt: "Judge {{output}}",
+  promptMessages: [{ role: "user", content: "Judge {{output}}" }],
   provider: null,
   model: null,
   modelParams: null,
@@ -259,6 +261,84 @@ describe("evaluator v2 repository", () => {
         ],
         totalItems: 1,
       });
+    });
+
+    it("matches LIKE wildcards literally in evaluator search", async () => {
+      await Promise.all([
+        createEvaluator({ name: "gpt_4-evaluator" }),
+        createEvaluator({ name: "gpt-4-evaluator" }),
+        createEvaluator({ name: "save 100% now" }),
+        createEvaluator({ name: "save 1000 now" }),
+      ]);
+
+      const searchNames = async (search: string) => {
+        const res = await evaluatorRepository.listEvaluators({
+          prisma,
+          projectId,
+          page: 1,
+          limit: 50,
+          search,
+        });
+        return res.evaluators.map((e) => e.name);
+      };
+
+      expect(await searchNames("gpt_4")).toEqual(["gpt_4-evaluator"]);
+      expect(await searchNames("100%")).toEqual(["save 100% now"]);
+    });
+
+    it("matches LIKE wildcards literally in exact creator filters", async () => {
+      const [literalCreator, wildcardMatch] = await Promise.all([
+        prisma.user.create({
+          data: { name: "creator_1", email: `${randomUUID()}@example.com` },
+        }),
+        prisma.user.create({
+          data: { name: "creator-1", email: `${randomUUID()}@example.com` },
+        }),
+      ]);
+
+      try {
+        const matching = await createEvaluator({
+          createdByUserId: literalCreator.id,
+        });
+        await createEvaluator({ createdByUserId: wildcardMatch.id });
+
+        const listIds = async (filter: FilterState) => {
+          const res = await evaluatorRepository.listEvaluators({
+            prisma,
+            projectId,
+            page: 1,
+            limit: 50,
+            filter,
+          });
+          return res.evaluators.map((e) => e.id);
+        };
+
+        expect(
+          await listIds([
+            {
+              column: "creator",
+              type: "string",
+              operator: "=",
+              value: "creator_1",
+            },
+          ]),
+        ).toEqual([matching.id]);
+        expect(
+          await listIds([
+            {
+              column: "creator",
+              type: "stringOptions",
+              operator: "any of",
+              value: ["creator_1"],
+            },
+          ]),
+        ).toEqual([matching.id]);
+      } finally {
+        await prisma.evaluator.deleteMany({ where: { projectId } });
+        await prisma.user.deleteMany({
+          where: { id: { in: [literalCreator.id, wildcardMatch.id] } },
+        });
+      }
     });
 
     it("preserves default update order and supports explicit creation order", async () => {
@@ -986,6 +1066,62 @@ describe("evaluator v2 repository", () => {
           },
         ],
       });
+    });
+
+    it("round-trips ordered prompt messages across evaluator versions", async () => {
+      const evaluator = await createEvaluator({
+        definition: llmDefinition({
+          promptMessages: [
+            { role: "system", content: "Judge carefully" },
+            { role: "user", content: "Judge {{output}}" },
+          ],
+        }),
+      });
+
+      await prisma.$transaction((tx) =>
+        evaluatorRepository.appendEvaluatorVersion({
+          tx,
+          evaluatorId: evaluator.id,
+          version: 2,
+          definition: llmDefinition({
+            promptMessages: [
+              { role: "system", content: "Judge very carefully" },
+              { role: "user", content: "Judge {{output}}" },
+              { role: "assistant", content: "Return a score" },
+            ],
+          }),
+          createdByUserId: null,
+        }),
+      );
+
+      const versions = await evaluatorRepository.listEvaluatorVersions({
+        prisma,
+        projectId,
+        evaluatorId: evaluator.id,
+        limit: 10,
+      });
+      expect(
+        versions.data.map(({ version, promptMessages }) => ({
+          version,
+          promptMessages,
+        })),
+      ).toEqual([
+        {
+          version: 2,
+          promptMessages: [
+            { role: "system", content: "Judge very carefully" },
+            { role: "user", content: "Judge {{output}}" },
+            { role: "assistant", content: "Return a score" },
+          ],
+        },
+        {
+          version: 1,
+          promptMessages: [
+            { role: "system", content: "Judge carefully" },
+            { role: "user", content: "Judge {{output}}" },
+          ],
+        },
+      ]);
     });
 
     it("persists LLM evaluator fields", async () => {

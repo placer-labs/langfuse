@@ -3,21 +3,26 @@ import { z } from "zod";
 import { createProductionEvalExecutionDeps } from "../evalExecutionDeps";
 import { EXPORT_VOLUME_METRIC } from "../../../services/exportVolumeMetric";
 
-const { mockCreateLLMOutput, mockGenerateLLMText, mockRecordIncrement } =
-  vi.hoisted(() => ({
-    mockCreateLLMOutput: vi.fn(),
-    mockGenerateLLMText: vi.fn(),
-    mockRecordIncrement: vi.fn(),
-  }));
+const {
+  mockGenerateLlmEvaluatorOutput,
+  mockRecordIncrement,
+  mockIngestionQueueAdd,
+} = vi.hoisted(() => ({
+  mockGenerateLlmEvaluatorOutput: vi.fn(),
+  mockRecordIncrement: vi.fn(),
+  mockIngestionQueueAdd: vi.fn(),
+}));
 
 vi.mock("@langfuse/shared/src/server", async (importOriginal) => {
   const original =
     await importOriginal<typeof import("@langfuse/shared/src/server")>();
   return {
     ...original,
-    createLLMOutput: mockCreateLLMOutput,
-    generateLLMText: mockGenerateLLMText,
+    generateLlmEvaluatorOutput: mockGenerateLlmEvaluatorOutput,
     recordIncrement: mockRecordIncrement,
+    IngestionQueue: {
+      getInstance: () => ({ add: mockIngestionQueueAdd }),
+    },
   };
 });
 
@@ -32,51 +37,52 @@ vi.mock("../../../env", async (importOriginal) => {
   };
 });
 
+const modelConfig = {
+  provider: "openai",
+  model: "gpt-4.1",
+  apiKey: { adapter: "openai", secretKey: "secret" },
+  adapter: "openai" as any,
+  modelParams: {},
+};
+
+const traceSinkParams = {
+  targetProjectId: "project-123",
+  traceId: "trace-123",
+  traceName: "Judge trace",
+  environment: "langfuse-llm-as-a-judge",
+  metadata: { score_id: "score-123" },
+};
+
+const structuredOutputSchema = z.object({
+  reasoning: z.string().describe("why this score was given"),
+  score: z.number().describe("score between 0 and 1"),
+});
+
 describe("createProductionEvalExecutionDeps", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockCreateLLMOutput.mockImplementation((schema) => ({ schema }));
-    mockGenerateLLMText.mockResolvedValue({ output: { completion: "ok" } });
+    mockGenerateLlmEvaluatorOutput.mockResolvedValue({
+      output: { score: 0.8, reasoning: "Good response" },
+      usage: {},
+      providerMessages: [],
+      modelFacingOutputSchema: structuredOutputSchema,
+    });
   });
 
-  it("enables internal direct event write for llm-as-a-judge traces", async () => {
+  it("calls the shared evaluator model call with direct event writes", async () => {
     const deps = createProductionEvalExecutionDeps();
 
-    await deps.callLLM({
-      messages: [
-        {
-          role: "user",
-          type: "user",
-          content: "Judge this answer",
-        },
-      ],
-      modelConfig: {
-        provider: "openai",
-        model: "gpt-4.1",
-        apiKey: {
-          adapter: "openai",
-          secretKey: "secret",
-        },
-        adapter: "openai" as any,
-        modelParams: {},
-      },
-      structuredOutputSchema: z.object({
-        reasoning: z.string(),
-        score: z.number(),
-      }),
-      traceSinkParams: {
-        targetProjectId: "project-123",
-        traceId: "trace-123",
-        traceName: "Judge trace",
-        environment: "langfuse-llm-as-a-judge",
-        metadata: {
-          score_id: "score-123",
-        },
-      },
-    });
+    const result = await deps.callLLM({
+      messages: [{ role: "user", type: "user", content: "Judge this answer" }],
+      modelConfig,
+      structuredOutputSchema,
+      traceSinkParams,
+    } as any);
 
-    expect(mockGenerateLLMText).toHaveBeenCalledWith(
+    expect(mockGenerateLlmEvaluatorOutput).toHaveBeenCalledWith(
       expect.objectContaining({
+        projectId: "project-123",
+        outputResultSchema: structuredOutputSchema,
         trace: expect.objectContaining({
           traceId: "trace-123",
           environment: "langfuse-llm-as-a-judge",
@@ -86,120 +92,106 @@ describe("createProductionEvalExecutionDeps", () => {
         }),
       }),
     );
-  });
-
-  it("renames reasoning only for the model call and maps it back", async () => {
-    mockGenerateLLMText.mockResolvedValue({
-      output: { score: 0.8, scoreExplanation: "Good response" },
-    });
-    const deps = createProductionEvalExecutionDeps();
-    const structuredOutputSchema = z.object({
-      reasoning: z.string().describe("why this score was given"),
-      score: z.number().describe("score between 0 and 1"),
-    });
-
-    const result = await deps.callLLM({
-      messages: [
-        {
-          role: "user",
-          type: "user",
-          content: "Judge this answer",
-        },
-      ],
-      modelConfig: {
-        provider: "openai",
-        model: "gpt-4.1",
-        apiKey: { adapter: "openai", secretKey: "secret" },
-        adapter: "openai" as any,
-        modelParams: {},
-      },
-      structuredOutputSchema,
-      traceSinkParams: {
-        targetProjectId: "project-123",
-        traceId: "trace-123",
-        traceName: "Judge trace",
-        environment: "langfuse-llm-as-a-judge",
-        metadata: {},
-      },
-    });
-
-    const modelOutput = mockGenerateLLMText.mock.calls[0][0].output as {
-      schema: z.ZodType;
-    };
-    expect(z.toJSONSchema(modelOutput.schema)).toMatchObject({
-      properties: {
-        scoreExplanation: { type: "string" },
-        score: { type: "number" },
-      },
-      required: ["scoreExplanation", "score"],
-    });
-    expect(z.toJSONSchema(modelOutput.schema).properties).not.toHaveProperty(
-      "reasoning",
-    );
-    expect(
-      structuredOutputSchema.safeParse({
-        score: 0.8,
-        reasoning: "Good response",
-      }).success,
-    ).toBe(true);
     expect(result).toEqual({ score: 0.8, reasoning: "Good response" });
   });
 
   it("records llmaj export volume using the schema's JSON Schema form", async () => {
-    const deps = createProductionEvalExecutionDeps();
-
-    const messages = [
-      { role: "user", type: "user", content: "Judge this answer" },
+    const providerMessages = [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Judge this answer" },
+          {
+            type: "file",
+            data: new Uint8Array([1, 2, 3]),
+            mediaType: "image/png",
+          },
+        ],
+      },
     ];
     // Production passes a Zod schema, not a plain object.
-    const structuredOutputSchema = z.object({
-      reasoning: z.string().describe("why this score was given"),
-      score: z.number().describe("score between 0 and 1"),
+    const modelFacingSchema = z
+      .object({
+        scoreExplanation: structuredOutputSchema.shape.reasoning,
+        score: structuredOutputSchema.shape.score,
+      })
+      .describe("model-facing schema");
+    mockGenerateLlmEvaluatorOutput.mockResolvedValueOnce({
+      output: { score: 0.8, reasoning: "Good response" },
+      usage: {},
+      providerMessages,
+      modelFacingOutputSchema: modelFacingSchema,
     });
+    const deps = createProductionEvalExecutionDeps();
 
     await deps.callLLM({
-      messages: messages as any,
-      modelConfig: {
-        provider: "openai",
-        model: "gpt-4.1",
-        apiKey: { adapter: "openai", secretKey: "secret" },
-        adapter: "openai" as any,
-        modelParams: {},
-      },
-      structuredOutputSchema: structuredOutputSchema as any,
-      traceSinkParams: {
-        targetProjectId: "project-123",
-        traceId: "trace-123",
-        traceName: "Judge trace",
-        environment: "langfuse-llm-as-a-judge",
-        metadata: {},
-      },
-    });
+      messages: [{ role: "user", type: "user", content: "Judge this answer" }],
+      modelConfig,
+      structuredOutputSchema,
+      traceSinkParams,
+    } as any);
 
-    const modelFacingSchema = z.object({
-      scoreExplanation: structuredOutputSchema.shape.reasoning,
-      score: structuredOutputSchema.shape.score,
-    });
+    const serializedProviderMessages = JSON.stringify(
+      providerMessages,
+      (_key, value) =>
+        value instanceof Uint8Array
+          ? Buffer.from(value).toString("base64")
+          : value,
+    );
     const expectedBytes =
-      Buffer.byteLength(JSON.stringify(messages), "utf8") +
+      Buffer.byteLength(serializedProviderMessages, "utf8") +
       Buffer.byteLength(
         JSON.stringify(z.toJSONSchema(modelFacingSchema)),
         "utf8",
       );
 
-    expect(expectedBytes).toBeGreaterThan(0);
     expect(mockRecordIncrement).toHaveBeenCalledWith(
       EXPORT_VOLUME_METRIC,
       expectedBytes,
       { integration: "llmaj" },
     );
     // Not the Zod _def form.
-    const zodDefBytes = Buffer.byteLength(
-      JSON.stringify(modelFacingSchema),
-      "utf8",
-    );
     expect(expectedBytes).not.toBe(
-      Buffer.byteLength(JSON.stringify(messages), "utf8") + zodDefBytes,
+      Buffer.byteLength(serializedProviderMessages, "utf8") +
+        Buffer.byteLength(JSON.stringify(modelFacingSchema), "utf8"),
+    );
+  });
+
+  it("does not record export volume when the model call fails", async () => {
+    mockGenerateLlmEvaluatorOutput.mockRejectedValueOnce(new Error("boom"));
+    const deps = createProductionEvalExecutionDeps();
+
+    await expect(
+      deps.callLLM({
+        messages: [
+          { role: "user", type: "user", content: "Judge this answer" },
+        ],
+        modelConfig,
+        structuredOutputSchema,
+        traceSinkParams,
+      } as any),
+    ).rejects.toThrow("boom");
+    expect(mockRecordIncrement).not.toHaveBeenCalled();
+  });
+
+  it("enqueues eval scores to read only their own S3 file", async () => {
+    const deps = createProductionEvalExecutionDeps();
+
+    await deps.enqueueScoreIngestion({
+      projectId: "project-123",
+      scoreId: "score-123",
+      eventId: "event-123",
+    });
+
+    expect(mockIngestionQueueAdd).toHaveBeenCalledTimes(1);
+    const [, job] = mockIngestionQueueAdd.mock.calls[0];
+    expect(job.payload.data).toEqual(
+      expect.objectContaining({
+        type: "score-create",
+        eventBodyId: "score-123",
+        fileKey: "event-123",
+        skipS3List: true,
+      }),
     );
   });
 });

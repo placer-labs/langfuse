@@ -1,5 +1,8 @@
 import { auditLog } from "@/src/features/audit-logs/auditLog";
-import { throwIfNoProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
+import {
+  hasProjectAccess,
+  throwIfNoProjectAccess,
+} from "@/src/features/rbac/utils/checkProjectAccess";
 import {
   createTRPCRouter,
   protectedProjectProcedure,
@@ -15,6 +18,7 @@ import {
   EvaluatorIdsSchema,
   EvaluatorOptionsSchema,
   EvaluatorVersionsSchema,
+  ListEvaluatorGallerySchema,
   ListEvaluatorsSchema,
   SuggestEvaluatorTextSchema,
   UpdateEvaluatorSchema,
@@ -65,6 +69,30 @@ export const evaluatorRouter = createTRPCRouter({
         ...input,
         projectId: ctx.session.projectId,
       });
+    }),
+
+  listGallery: protectedProjectProcedure
+    .input(ListEvaluatorGallerySchema)
+    .query(async ({ input, ctx }) => {
+      throwIfNoProjectAccess({
+        session: ctx.session,
+        projectId: ctx.session.projectId,
+        scope: "evaluator:read",
+      });
+      const service = serviceForContext(ctx);
+      const params = {
+        ...input,
+        projectId: ctx.session.projectId,
+      };
+      const [result, totalItems] = await Promise.all([
+        service.listCursor(params),
+        input.cursor ? undefined : service.count(params),
+      ]);
+
+      return {
+        ...result,
+        totalItems,
+      };
     }),
 
   filterOptions: protectedProjectProcedure
@@ -120,7 +148,7 @@ export const evaluatorRouter = createTRPCRouter({
       });
     }),
 
-  recentExecutions: protectedProjectProcedure
+  executionSummaries: protectedProjectProcedure
     .input(EvaluatorIdsSchema)
     .query(({ input, ctx }) => {
       throwIfNoProjectAccess({
@@ -128,7 +156,7 @@ export const evaluatorRouter = createTRPCRouter({
         projectId: ctx.session.projectId,
         scope: "evalJobExecution:read",
       });
-      return serviceForContext(ctx).listRecent({
+      return serviceForContext(ctx).getExecutionSummaries({
         ...input,
         projectId: ctx.session.projectId,
       });
@@ -154,12 +182,23 @@ export const evaluatorRouter = createTRPCRouter({
       throwIfNoProjectAccess({
         session: ctx.session,
         projectId: ctx.session.projectId,
+        scope: "evalJobExecution:read",
+      });
+      const canRunMissingCostTest = hasProjectAccess({
+        session: ctx.session,
+        projectId: ctx.session.projectId,
         scope: "evaluationRule:CUD",
       });
+      const { shouldRunMissingTest, ...estimateInput } = input;
+      let missingCostMode: "probe" | "wait" | "skip" = "skip";
+      if (canRunMissingCostTest) {
+        missingCostMode = shouldRunMissingTest ? "probe" : "wait";
+      }
       return getActivationCostEstimates({
-        ...input,
+        ...estimateInput,
         projectId: ctx.session.projectId,
         orgId: ctx.session.orgId,
+        missingCostMode,
         shouldReadFromObservationsTable:
           ctx.session.user.v4BetaEnabled !== true,
       });

@@ -2,12 +2,11 @@
  * Which tree node owns a trace's trace-level scores (`observationId === null`).
  *
  * v3 traces render a TRACE wrapper row that owns them. v4 events-based traces
- * have no such row, so the top-level span(s) stand in for the trace and own
- * them alongside their own observation-level scores.
+ * have no such row, so the top-level span(s) stand in for the trace.
  *
- * Single source of this rule: the tree badge, the timeline badge and the Scores
- * tab all derive from it, so a node's badge count and its Scores tab agree
- * (LFE-14405).
+ * Ownership only widens a node's Scores tab to the trace-level rows. Badges
+ * never mix levels: the trace header carries the trace-level chips, a tree row
+ * carries only its own.
  */
 
 import { type TreeNode } from "../types/treeNode";
@@ -41,12 +40,19 @@ export function traceLevelScoreOwnerIds(
 export function selectNodeScores<T extends LeveledScore>(
   scores: T[],
   nodeId: string,
-  traceLevelOwnerIds: Set<string>,
 ): T[] {
-  return traceLevelOwnerIds.has(nodeId)
-    ? scores.filter(
-        (score) =>
-          score.observationId === nodeId || score.observationId === null,
-      )
-    : scores.filter((score) => score.observationId === nodeId);
+  return scores.filter((score) => score.observationId === nodeId);
+}
+
+/**
+ * Observation-scoped CORRECTIONs for a tree row. Trace-level
+ * (`observationId === null`) never appear here — those stay on TraceHeader.
+ */
+export function selectNodeCorrections<T extends LeveledScore>(
+  corrections: T[],
+  nodeId: string,
+): T[] {
+  return corrections.filter(
+    (correction) => correction.observationId === nodeId,
+  );
 }

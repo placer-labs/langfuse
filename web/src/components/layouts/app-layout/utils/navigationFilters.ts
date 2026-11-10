@@ -8,12 +8,26 @@ import type { NavigationFilterContext } from "./navigationFilters.types";
 import { hasProjectAccess } from "@/src/features/rbac/utils/checkProjectAccess";
 import { hasOrganizationAccess } from "@/src/features/rbac/utils/checkOrganizationAccess";
 import type { Session } from "next-auth";
+import { isInternalFeaturePreviewFlag } from "@/src/features/feature-flags/available-flags";
+import { getContextualFeatureFlags } from "@/src/features/feature-flags/utils";
+import { canViewTopics } from "@/src/features/topics/topicsAccess";
 
 /** Organization type from user session (can be null when not in project/org context) */
 type Organization =
   | NonNullable<Session["user"]>["organizations"][number]
   | null
   | undefined;
+
+function canRecoverV4(ctx: NavigationFilterContext): boolean {
+  return (
+    ctx.isLangfuseCloud &&
+    Boolean(ctx.routerProjectId) &&
+    ctx.forceV3Experience !== true &&
+    ctx.session?.environment?.v4WriteMode === "dual" &&
+    ctx.session?.user?.canToggleV4 === false &&
+    ctx.session?.user?.v4BetaEnabled === false
+  );
+}
 
 /**
  * Individual filter functions - each handles one concern
@@ -24,7 +38,7 @@ const filters = {
    * Filter routes that require a project ID when none is available
    */
   projectScope: (route: Route, ctx: NavigationFilterContext): Route | null => {
-    if (!ctx.routerProjectId && route.pathname.includes("[projectId]")) {
+    if (!ctx.routerProjectId && route.href.includes("[projectId]")) {
       return null;
     }
     return route;
@@ -37,10 +51,7 @@ const filters = {
     route: Route,
     ctx: NavigationFilterContext,
   ): Route | null => {
-    if (
-      !ctx.routerOrganizationId &&
-      route.pathname.includes("[organizationId]")
-    ) {
+    if (!ctx.routerOrganizationId && route.href.includes("[organizationId]")) {
       return null;
     }
     return route;
@@ -69,24 +80,37 @@ const filters = {
    * Shows route if:
    * - No flag requirement
    * - Experimental features enabled
-   * - User is cloud admin
    * - User has specific feature flag
    */
   featureFlags: (route: Route, ctx: NavigationFilterContext): Route | null => {
     if (route.featureFlag === undefined) return route;
+
+    if (isInternalFeaturePreviewFlag(route.featureFlag)) {
+      return ctx.session?.user?.featureFlags?.[route.featureFlag] === true
+        ? route
+        : null;
+    }
+
+    if (route.featureFlag === "internalFeatures") {
+      return ctx.internalFeaturesEnabled ? route : null;
+    }
 
     if (route.featureFlag === "experimentsV4Enabled") {
       return ctx.session?.user?.v4BetaEnabled === true ? route : null;
     }
 
     if (route.featureFlag === "v4BetaToggleVisible") {
-      return ctx.session?.user?.canToggleV4 === true ? route : null;
+      return ctx.session?.user?.canToggleV4 === true || canRecoverV4(ctx)
+        ? route
+        : null;
     }
 
     const hasFlag =
       ctx.enableExperimentalFeatures ||
-      ctx.cloudAdmin ||
-      ctx.session?.user?.featureFlags?.[route.featureFlag] === true;
+      getContextualFeatureFlags(ctx.session?.user, {
+        projectId: ctx.routerProjectId,
+        organizationId: ctx.routerOrganizationId,
+      })?.[route.featureFlag] === true;
 
     return hasFlag ? route : null;
   },
@@ -169,7 +193,17 @@ const filters = {
     return route.show({
       organization: organization ?? undefined,
       projectId: ctx.routerProjectId,
+      canViewTopics: canViewTopics(
+        ctx.session,
+        organization?.projects.find(
+          (project) => project.id === ctx.routerProjectId,
+        ),
+      ),
       isLangfuseCloud: ctx.isLangfuseCloud,
+      hasActiveCloudIncident: ctx.hasActiveCloudIncident,
+      canToggleV4: ctx.session?.user?.canToggleV4 === true,
+      canRecoverV4: canRecoverV4(ctx),
+      forceV3Experience: ctx.forceV3Experience,
       v4WriteMode: ctx.session?.environment?.v4WriteMode,
       v4UpgradeUiAvailable: ctx.session?.user?.v4UpgradeUiAvailable === true,
     })

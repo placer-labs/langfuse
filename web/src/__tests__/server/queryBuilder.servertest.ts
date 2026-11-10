@@ -5,6 +5,10 @@ import {
   validateQuery,
   type QueryType,
 } from "@langfuse/shared/query";
+import {
+  AI_GATEWAY_KEY_OWNER_USER_ID_METADATA_KEY,
+  AI_GATEWAY_SERVICE_NAME,
+} from "@langfuse/shared";
 import { env } from "@/src/env.mjs";
 import {
   createTrace,
@@ -3381,8 +3385,13 @@ describe("queryBuilder", () => {
         result.data = await executeQuery(projectId, query);
 
         expect(result.data).toHaveLength(2);
-        expect(result.data[0].name).toBe("observation-basic");
-        expect(Number(result.data[0].count_count)).toBe(1);
+        expect(result.data.map((row) => row.name).toSorted()).toEqual([
+          "observation-basic",
+          "observation-premium",
+        ]);
+        expect(result.data.every((row) => Number(row.count_count) === 1)).toBe(
+          true,
+        );
       });
 
       it("should generate histogram with custom bin count for cost distribution", async () => {
@@ -4074,6 +4083,9 @@ describe("queryBuilder", () => {
       expect(sql.indexOf("ARRAY JOIN")).toBeLessThan(sql.indexOf("WHERE"));
       // No inline arrayJoin() function call — must use clause form
       expect(sql).not.toMatch(/arrayJoin\(mapKeys/);
+      // ARRAY JOIN already aliases the key; re-emitting `costType AS costType`
+      // makes ClickHouse throw "Duplicate alias in ARRAY JOIN".
+      expect(sql).not.toMatch(/costType\s+as\s+costType/i);
     });
 
     maybeItWithEventsTable(
@@ -4086,13 +4098,13 @@ describe("queryBuilder", () => {
             project_id: projectId,
             type: "GENERATION",
             cost_details: { input: 10, output: 20, total: 30 },
-            start_time: Date.now() * 1000,
+            start_time: Date.now(),
           }),
           createEvent({
             project_id: projectId,
             type: "GENERATION",
             cost_details: { input: 5, output: 15, total: 20 },
-            start_time: Date.now() * 1000,
+            start_time: Date.now(),
           }),
         ];
         await createEventsCh(events);
@@ -4136,13 +4148,13 @@ describe("queryBuilder", () => {
             project_id: projectId,
             type: "GENERATION",
             usage_details: { input: 100, output: 200, total: 300 },
-            start_time: Date.now() * 1000,
+            start_time: Date.now(),
           }),
           createEvent({
             project_id: projectId,
             type: "GENERATION",
             usage_details: { input: 50, output: 75, total: 125 },
-            start_time: Date.now() * 1000,
+            start_time: Date.now(),
           }),
         ];
         await createEventsCh(events);
@@ -4244,13 +4256,13 @@ describe("queryBuilder", () => {
             project_id: projectId,
             type: "GENERATION",
             cost_details: { input: 10 },
-            start_time: Date.now() * 1000,
+            start_time: Date.now(),
           }),
           createEvent({
             project_id: projectId,
             type: "SPAN",
             cost_details: { input: 999 },
-            start_time: Date.now() * 1000,
+            start_time: Date.now(),
           }),
         ];
         await createEventsCh(events);
@@ -4297,13 +4309,13 @@ describe("queryBuilder", () => {
             project_id: projectId,
             type: "GENERATION",
             cost_details: { input: 10, output: 20, total: 30 },
-            start_time: Date.now() * 1000,
+            start_time: Date.now(),
           }),
           createEvent({
             project_id: projectId,
             type: "GENERATION",
             cost_details: { input: 5, output: 15, total: 20 },
-            start_time: Date.now() * 1000,
+            start_time: Date.now(),
           }),
         ];
         await createEventsCh(events);
@@ -4349,7 +4361,7 @@ describe("queryBuilder", () => {
             project_id: projectId,
             type: "GENERATION",
             cost_details: { input: 7, output: 3 },
-            start_time: Date.now() * 1000,
+            start_time: Date.now(),
           }),
         ];
         await createEventsCh(events);
@@ -4432,6 +4444,106 @@ describe("queryBuilder", () => {
         ),
       ).rejects.toThrow("Only one pairExpand dimension is supported per query");
     });
+  });
+
+  describe("AI gateway attribution (v2)", () => {
+    const itWithEventsTable =
+      env.LANGFUSE_MIGRATION_V4_ALLOW_PREVIEW_OPT_IN === "true" ? it : it.skip;
+
+    itWithEventsTable(
+      "attributes user-tied keys to their owner and leaves service keys out",
+      async () => {
+        const projectId = randomUUID();
+        const gatewayEvent = (params: {
+          keyId: string;
+          ownerUserId?: string;
+          userId?: string;
+        }) =>
+          createEvent({
+            project_id: projectId,
+            type: "GENERATION",
+            start_time: Date.now() * 1000,
+            service_name: AI_GATEWAY_SERVICE_NAME,
+            ingestion_api_key: params.keyId,
+            user_id: params.userId ?? null,
+            metadata_names: params.ownerUserId
+              ? [AI_GATEWAY_KEY_OWNER_USER_ID_METADATA_KEY]
+              : [],
+            metadata_values: params.ownerUserId ? [params.ownerUserId] : [],
+          });
+        await createEventsCh([
+          gatewayEvent({ keyId: "key-a1", ownerUserId: "user-a" }),
+          // A second key of the same owner, e.g. one revoked since.
+          gatewayEvent({ keyId: "key-a2", ownerUserId: "user-a" }),
+          // A service key whose caller claims to be user-a.
+          gatewayEvent({ keyId: "service-key", userId: "user-a" }),
+          // SDK traffic into the same project.
+          createEvent({
+            project_id: projectId,
+            type: "GENERATION",
+            start_time: Date.now() * 1000,
+            user_id: "user-a",
+            ingestion_api_key: "pk-lf-sdk",
+          }),
+        ]);
+
+        const result = await executeQuery(
+          projectId,
+          {
+            view: "observations",
+            dimensions: [{ field: "aiGatewayKeyOwnerUserId" }],
+            metrics: [{ measure: "count", aggregation: "count" }],
+            filters: [
+              {
+                column: "aiGatewayKeyOwnerUserId",
+                operator: "is not null",
+                value: "",
+                type: "null",
+              },
+            ],
+            timeDimension: null,
+            fromTimestamp: new Date(Date.now() - 86400000).toISOString(),
+            toTimestamp: new Date(Date.now() + 86400000).toISOString(),
+            orderBy: null,
+          },
+          "v2",
+          true,
+        );
+
+        expect(
+          Object.fromEntries(
+            result.map((row) => [
+              String(row["aiGatewayKeyOwnerUserId"]),
+              Number(row["count_count"]),
+            ]),
+          ),
+        ).toEqual({ "user-a": 2 });
+
+        const [keyFiltered] = await executeQuery(
+          projectId,
+          {
+            view: "observations",
+            dimensions: [],
+            metrics: [{ measure: "count", aggregation: "count" }],
+            filters: [
+              {
+                column: "aiGatewayKeyId",
+                operator: "any of",
+                value: ["key-a1", "service-key"],
+                type: "stringOptions",
+              },
+            ],
+            timeDimension: null,
+            fromTimestamp: new Date(Date.now() - 86400000).toISOString(),
+            toTimestamp: new Date(Date.now() + 86400000).toISOString(),
+            orderBy: null,
+          },
+          "v2",
+          true,
+        );
+        expect(Number(keyFiltered["count_count"])).toBe(2);
+      },
+    );
   });
 });
 
@@ -5041,7 +5153,7 @@ describe("query builder measure-aggregation validation", () => {
             trace_name: "",
             name: "my-trace",
             parent_span_id: "", // root event
-            start_time: Date.now() * 1000,
+            start_time: Date.now(),
           }),
           createEvent({
             project_id: projectId,
@@ -5049,7 +5161,7 @@ describe("query builder measure-aggregation validation", () => {
             trace_name: "",
             name: "child-observation",
             parent_span_id: "some-parent", // child event
-            start_time: Date.now() * 1000,
+            start_time: Date.now(),
           }),
           // Trace 2: trace_name is "other-trace"
           createEvent({
@@ -5058,7 +5170,7 @@ describe("query builder measure-aggregation validation", () => {
             trace_name: "other-trace",
             name: "root-event",
             parent_span_id: "", // root event
-            start_time: Date.now() * 1000,
+            start_time: Date.now(),
           }),
         ];
         await createEventsCh(events);
@@ -5108,7 +5220,7 @@ describe("query builder measure-aggregation validation", () => {
             trace_name: "target-trace",
             name: "root-observation",
             parent_span_id: "",
-            start_time: Date.now() * 1000,
+            start_time: Date.now(),
           }),
           createEvent({
             project_id: projectId,
@@ -5116,7 +5228,7 @@ describe("query builder measure-aggregation validation", () => {
             trace_name: "other-trace",
             name: "root-observation",
             parent_span_id: "",
-            start_time: Date.now() * 1000,
+            start_time: Date.now(),
           }),
         ];
         await createEventsCh(events);
@@ -5169,7 +5281,7 @@ describe("query builder measure-aggregation validation", () => {
             name: "root-op",
             parent_span_id: "",
             environment: "production",
-            start_time: Date.now() * 1000,
+            start_time: Date.now(),
           }),
           // Trace 2: name="target-trace", environment="staging"
           createEvent({
@@ -5179,7 +5291,7 @@ describe("query builder measure-aggregation validation", () => {
             name: "root-op",
             parent_span_id: "",
             environment: "staging",
-            start_time: Date.now() * 1000,
+            start_time: Date.now(),
           }),
           // Trace 3: name="other-trace", environment="production"
           createEvent({
@@ -5189,7 +5301,7 @@ describe("query builder measure-aggregation validation", () => {
             name: "root-op",
             parent_span_id: "",
             environment: "production",
-            start_time: Date.now() * 1000,
+            start_time: Date.now(),
           }),
         ];
         await createEventsCh(events);
@@ -5318,7 +5430,7 @@ describe("query builder measure-aggregation validation", () => {
             parent_span_id: "",
             metadata_names: ["experiments"],
             metadata_values: [longValue],
-            start_time: Date.now() * 1000,
+            start_time: Date.now(),
           }),
         ]);
 

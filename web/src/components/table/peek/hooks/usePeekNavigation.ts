@@ -1,5 +1,5 @@
 import { getPathnameWithoutBasePath } from "@/src/utils/api";
-import { type ListEntry } from "@/src/features/navigate-detail-pages/context";
+import type { ListEntry } from "@/src/features/navigate-detail-pages/DetailPageListsProvider";
 import { useRouter } from "next/router";
 import { useCallback } from "react";
 import { urlSearchParamsToQuery } from "@/src/utils/navigation";
@@ -11,7 +11,13 @@ const PEEK_PARAM = "peek";
 const PEEK_VIEW_PARAM = "peekView";
 
 interface BasePeekConfig {
-  /** Analytics table identity for peek:* events. Forward from the owning table. */
+  /**
+   * Which table this peek belongs to, for the `peek:*` analytics.
+   * `routePattern` alone cannot separate two tables on one route (the dataset
+   * run items by-run / by-item views, the experiments results layouts), so the
+   * table names itself. Required on purpose: an optional dimension is one a new
+   * table forgets to pass.
+   */
   tableName: string;
   /** Surface dimension at the moment of the action. Do not derive from the global v4 flag. */
   isV4: boolean;
@@ -52,9 +58,13 @@ interface PeekConfigWithExpand extends BasePeekConfig {
   };
 }
 
+export type PeekOpenOptions = {
+  queryParams?: Record<string, string>;
+};
+
 interface BasePeekNavigation {
   /** Open or close peek view. Pass id to open */
-  openPeek: (id?: string, row?: any) => void;
+  openPeek: (id?: string, row?: any, options?: PeekOpenOptions) => void;
   /** Close the peek view */
   closePeek: () => void;
   /** Resolve the navigation path for a detail entry */
@@ -86,12 +96,13 @@ export function usePeekNavigation(config: PeekConfig | PeekConfigWithExpand) {
   // Every peek is opened/closed through this hook, so open/close/new-tab
   // analytics live here once instead of in each consuming table. Props are
   // metadata-only: `routePattern` is the Next.js route PATTERN
-  // (`/project/[projectId]/traces`), never a concrete URL with ids.
+  // (`/project/[projectId]/traces`), never a concrete URL with ids, and
+  // `tableName` is the table's own analytics identity.
   const routePattern = router.pathname;
   const { isV4, tableName } = config;
 
   const openPeek = useCallback(
-    (id?: string, row?: any) => {
+    (id?: string, row?: any, options?: PeekOpenOptions) => {
       const pathname = getPathnameWithoutBasePath();
       const url = new URL(window.location.href);
       const params = new URLSearchParams(url.search);
@@ -104,6 +115,7 @@ export function usePeekNavigation(config: PeekConfig | PeekConfigWithExpand) {
         }
         params.delete(PEEK_PARAM);
         params.delete(PEEK_VIEW_PARAM);
+        params.delete("aggregation");
         config?.queryParams?.forEach((param) => params.delete(param));
       } else {
         // Re-clicking the already-peeked row is a no-op open — don't count it.
@@ -135,6 +147,12 @@ export function usePeekNavigation(config: PeekConfig | PeekConfigWithExpand) {
         }
       }
 
+      if (id) {
+        Object.entries(options?.queryParams ?? {}).forEach(([key, value]) => {
+          params.set(key, value);
+        });
+      }
+
       router.push(
         {
           pathname,
@@ -160,6 +178,7 @@ export function usePeekNavigation(config: PeekConfig | PeekConfigWithExpand) {
     // Close peek view - clear all peek-related params
     params.delete(PEEK_PARAM);
     params.delete(PEEK_VIEW_PARAM);
+    params.delete("aggregation");
     config?.queryParams?.forEach((param) => params.delete(param));
 
     router.push(
@@ -234,7 +253,10 @@ export function usePeekNavigation(config: PeekConfig | PeekConfigWithExpand) {
         ? resolved.traceId
         : (params.get(pathParam) ?? params.get(PEEK_PARAM));
       const pathname = `${config?.expandConfig?.basePath}/${pathId}`;
-      const queryParams = config?.queryParams
+      const forwardedParams = [
+        ...new Set([...(config.queryParams ?? []), "aggregation"]),
+      ];
+      const queryParams = forwardedParams
         ?.map((param) => {
           // The resolved trace id is the path segment; don't repeat it.
           if (resolved && param === "traceId") return null;

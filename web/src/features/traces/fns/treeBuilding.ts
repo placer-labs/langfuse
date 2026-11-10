@@ -24,6 +24,11 @@ import { type TreeNode } from "../types/treeNode";
 import { type ObservationReturnType } from "@/src/server/api/routers/traces";
 import Decimal from "decimal.js";
 import {
+  computeTraceMetricEmphasis,
+  metricEmphasisFor,
+  type TraceMetricEmphasis,
+} from "@/src/features/traces/fns/metricEmphasis";
+import {
   type ObservationLevelType,
   ObservationLevel,
   type TraceDomain,
@@ -541,37 +546,86 @@ function buildTraceTree(
 export function buildTraceUiData(
   trace: TraceType,
   observations: ObservationReturnType[],
+  sessionTraces?: TraceType[],
 ): {
   roots: TreeNode[];
   searchItems: TraceSearchListItem[];
   nodeMap: Map<string, TreeNode>;
+  metricEmphasis: TraceMetricEmphasis;
 } {
-  const { roots, nodeMap } = buildTraceTree(trace, observations);
+  const { roots, nodeMap } = (() => {
+    if (!sessionTraces) return buildTraceTree(trace, observations);
+
+    const roots: TreeNode[] = [];
+    const nodeMap = new Map<string, TreeNode>();
+    const observationIdCounts = new Map<string, number>();
+    const observationsByTrace = new Map<string, ObservationReturnType[]>();
+    for (const observation of observations) {
+      observationIdCounts.set(
+        observation.id,
+        (observationIdCounts.get(observation.id) ?? 0) + 1,
+      );
+      const group = observationsByTrace.get(observation.traceId) ?? [];
+      group.push(observation);
+      observationsByTrace.set(observation.traceId, group);
+    }
+    let sessionStart = trace.timestamp.getTime();
+    for (const sessionTrace of sessionTraces) {
+      sessionStart = Math.min(sessionStart, sessionTrace.timestamp.getTime());
+    }
+    for (const sessionTrace of sessionTraces) {
+      const tree = buildTraceTree(
+        {
+          ...sessionTrace,
+          rootObservationType: undefined,
+          rootObservationId: undefined,
+        },
+        observationsByTrace.get(sessionTrace.id) ?? [],
+      );
+      for (const [id, node] of tree.nodeMap) {
+        if (node.type !== "TRACE") {
+          node.observationId = id;
+          if ((observationIdCounts.get(id) ?? 0) > 1) {
+            node.id = `${sessionTrace.id}:${id}`;
+          }
+        }
+        node.traceId = sessionTrace.id;
+        node.startTimeSinceTrace = node.startTime.getTime() - sessionStart;
+        nodeMap.set(node.id, node);
+      }
+      roots.push(...tree.roots);
+    }
+    roots.sort((a, b) => a.startTime.getTime() - b.startTime.getTime());
+    return { roots, nodeMap };
+  })();
+  const metricEmphasis = computeTraceMetricEmphasis(roots);
+  if (sessionTraces) {
+    metricEmphasis.wholeTraceNodeIds.clear();
+    metricEmphasis.totals.traceTotalCost = roots.reduce<Decimal | undefined>(
+      (total, root) => {
+        if (!root.totalCost) return total;
+        return total ? total.plus(root.totalCost) : root.totalCost;
+      },
+      undefined,
+    );
+    let first = Infinity;
+    let last = -Infinity;
+    for (const node of nodeMap.values()) {
+      first = Math.min(first, node.startTime.getTime());
+      last = Math.max(
+        last,
+        node.endTime?.getTime() ??
+          node.startTime.getTime() + (node.latency ?? 0) * 1000,
+      );
+    }
+    metricEmphasis.totals.traceTotalDurationMs =
+      nodeMap.size > 0 ? last - first : undefined;
+  }
 
   // Handle empty roots case
   if (roots.length === 0) {
-    return { roots, searchItems: [], nodeMap };
+    return { roots, searchItems: [], nodeMap, metricEmphasis };
   }
-
-  // TODO: Extract aggregation logic to shared utility - duplicated in TraceTree.tsx and TraceTimeline/index.tsx
-  // Calculate aggregated totals across all roots for heatmap scaling
-  const rootTotalCost = roots.reduce<Decimal | undefined>((acc, r) => {
-    if (!r.totalCost) return acc;
-    return acc ? acc.plus(r.totalCost) : r.totalCost;
-  }, undefined);
-
-  const rootDuration =
-    roots.length > 0
-      ? Math.max(
-          ...roots.map((r) =>
-            r.latency
-              ? r.latency * 1000
-              : r.endTime
-                ? r.endTime.getTime() - r.startTime.getTime()
-                : 0,
-          ),
-        )
-      : undefined;
 
   // Build flat search items list (iterative to avoid stack overflow on deep trees)
   const searchItems: TraceSearchListItem[] = [];
@@ -586,9 +640,9 @@ export function buildTraceUiData(
     const node = stack.pop()!;
     searchItems.push({
       node,
-      parentTotalCost: rootTotalCost,
-      parentTotalDuration: rootDuration,
-      observationId: node.type === "TRACE" ? undefined : node.id,
+      emphasis: metricEmphasisFor(node, metricEmphasis),
+      observationId:
+        node.type === "TRACE" ? undefined : (node.observationId ?? node.id),
     });
     // Push children in reverse order to maintain depth-first left-to-right traversal
     for (let i = node.children.length - 1; i >= 0; i--) {
@@ -596,7 +650,7 @@ export function buildTraceUiData(
     }
   }
 
-  return { roots, searchItems, nodeMap };
+  return { roots, searchItems, nodeMap, metricEmphasis };
 }
 
 /**

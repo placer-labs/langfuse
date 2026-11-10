@@ -7,19 +7,15 @@ import {
 } from "@/src/features/traces/components/AdvancedJsonViewer/MultiSectionJsonViewer";
 import { Command, CommandInput } from "@/src/components/ui/command";
 import { Button } from "@/src/components/ui/button";
-import { ChevronUp, ChevronDown, WrapText, Minus, Copy } from "lucide-react";
+import { ChevronUp, ChevronDown, WrapText, Minus, Copy } from "@langfuse/icons";
 import { useJsonViewPreferences } from "@/src/features/traces/components/AdvancedJsonViewer/hooks/useJsonViewPreferences";
-import { type MediaReturnType } from "@/src/features/media/validation";
-import {
-  HoverCard,
-  HoverCardContent,
-  HoverCardTrigger,
-} from "@/src/components/ui/hover-card";
+import type { MediaReturnType } from "@/src/features/media/validation";
+import { HoverCard } from "@/src/components/design-system/HoverCard/HoverCard";
 import {
   InlineCommentSelectionProvider,
   useInlineCommentSelectionOptional,
   type SelectionData,
-} from "@/src/features/comments/contexts/InlineCommentSelectionContext";
+} from "@/src/features/comments/contexts/InlineCommentSelectionProvider";
 import { CommentableJsonView } from "@/src/features/comments/components/CommentableJsonView";
 import { InlineCommentBubble } from "@/src/features/comments/components/InlineCommentBubble";
 import { type CommentedPathsByField } from "@/src/features/traces/components/AdvancedJsonViewer/utils/commentRanges";
@@ -29,7 +25,10 @@ import {
   decodeUnicodeInJson,
   DECODE_UNICODE_MAX_NODES,
 } from "@/src/utils/decodeUnicodeInJson";
-import { CorrectedOutputField } from "./components/CorrectedOutputField";
+import {
+  CorrectedOutputSection,
+  shouldShowCorrectedOutputSection,
+} from "./components/CorrectedOutputSection";
 import { LargeJsonFieldFallback } from "./components/LargeJsonFieldFallback";
 import { LazyJsonViewer } from "@/src/features/traces/components/AdvancedJsonViewer/lazy/react/LazyJsonViewer";
 import {
@@ -48,15 +47,17 @@ import {
 // `needsVirtualization` note below.
 const VIRTUALIZATION_THRESHOLD = JSON_VIEW_RENDER_ROW_LIMIT;
 
-const STATUS_MESSAGE_BACKGROUND_COLORS: Record<
-  ObservationStatusMessage["level"],
-  string
-> = {
-  ERROR: "var(--light-red)",
-  WARNING: "var(--light-yellow)",
-  DEBUG: "hsl(var(--muted) / 0.3)",
-  DEFAULT: "hsl(var(--card))",
-};
+// Light values are Tailwind red-50 / yellow-50, matching status IOSection tones.
+function statusMessageBackgroundColor(
+  level: ObservationStatusMessage["level"],
+  isDark: boolean,
+) {
+  if (level === "ERROR")
+    return isDark ? "var(--light-red)" : "oklch(97.1% 0.013 17.38)";
+  if (level === "WARNING")
+    return isDark ? "var(--light-yellow)" : "oklch(98.7% 0.026 102.212)";
+  return "hsl(var(--surface-section))";
+}
 
 /**
  * Decode a field's \uXXXX escapes, but only when it fits under the decoder's
@@ -78,6 +79,7 @@ export interface IOPreviewJSONProps {
   status?: ObservationStatusMessage;
   metadata?: Prisma.JsonValue;
   outputCorrection?: ScoreDomain;
+  traceOutputCorrection?: ScoreDomain;
   // Pre-parsed data (from useParsedObservation hook)
   parsedInput?: unknown;
   parsedOutput?: unknown;
@@ -86,6 +88,7 @@ export interface IOPreviewJSONProps {
   hideIfNull?: boolean;
   hideOutput?: boolean;
   hideInput?: boolean;
+  hideMetadata?: boolean;
   // Media attachments
   media?: MediaReturnType[];
   // Callback to inform parent if virtualization is being used (for scroll handling)
@@ -127,10 +130,12 @@ function IOPreviewJSONInner({
   parsedOutput,
   parsedMetadata,
   outputCorrection,
+  traceOutputCorrection,
   isParsing = false,
   hideIfNull = false,
   hideOutput = false,
   hideInput = false,
+  hideMetadata = false,
   media,
   onVirtualizationChange,
   enableInlineComments = false,
@@ -145,6 +150,10 @@ function IOPreviewJSONInner({
   showCorrections = true,
 }: IOPreviewJSONProps) {
   const selectionContext = useInlineCommentSelectionOptional();
+  const inlineCommentPositionRect = selectionContext?.selection?.anchorRect
+    ? (selectionContext.selection.startRect ??
+      selectionContext.selection.anchorRect)
+    : null;
 
   const handleAddComment = useCallback(() => {
     if (selectionContext?.selection && onAddInlineComment) {
@@ -159,7 +168,7 @@ function IOPreviewJSONInner({
   const { inputBgColor, outputBgColor, metadataBgColor } = useMemo(
     () => ({
       inputBgColor: isDark ? "rgb(15, 23, 42)" : "rgb(249, 252, 255)", // Dark slate vs light blue
-      outputBgColor: isDark ? "rgb(20, 30, 41)" : "rgb(248, 253, 250)", // Dark blue-gray vs light green
+      outputBgColor: "hsl(var(--surface-section))",
       metadataBgColor: isDark ? "rgb(30, 20, 40)" : "rgb(253, 251, 254)", // Dark purple vs light purple
     }),
     [isDark],
@@ -274,7 +283,8 @@ function IOPreviewJSONInner({
     !hideOutput &&
     (outputTooLarge || !(hideIfNull && effectiveOutput === undefined));
   const showMetadata =
-    metadataTooLarge || !(hideIfNull && effectiveMetadata === undefined);
+    !hideMetadata &&
+    (metadataTooLarge || !(hideIfNull && effectiveMetadata === undefined));
 
   const downloadName = observationId ?? traceId;
 
@@ -393,17 +403,15 @@ function IOPreviewJSONInner({
     effectiveMetadata,
   ]);
 
-  const wrapIcon = useMemo(
-    () =>
-      stringWrapMode === "truncate" ? (
-        <Minus size={14} />
-      ) : stringWrapMode === "wrap" ? (
-        <WrapText size={14} />
-      ) : (
-        <ChevronDown size={14} className="-rotate-90" />
-      ),
-    [stringWrapMode],
-  );
+  const wrapIcon = useMemo(() => {
+    if (stringWrapMode === "truncate") {
+      return <Minus size="base" />;
+    }
+    if (stringWrapMode === "wrap") {
+      return <WrapText size="base" />;
+    }
+    return <ChevronDown size="base" __rawClassName="-rotate-90" />;
+  }, [stringWrapMode]);
 
   // Build sections - memoized to prevent re-creation. A gated field renders as
   // a section with no data (hideData → the viewer builds no tree for it, so it
@@ -494,7 +502,7 @@ function IOPreviewJSONInner({
         key: "status-message",
         title: statusPresentation.title,
         data: parseStructuredStatusMessage(status.message) ?? status.message,
-        backgroundColor: STATUS_MESSAGE_BACKGROUND_COLORS[status.level],
+        backgroundColor: statusMessageBackgroundColor(status.level, isDark),
         minHeight: "4px",
       });
     }
@@ -530,7 +538,15 @@ function IOPreviewJSONInner({
             },
       );
     }
-    if (showCorrections) {
+    if (
+      showCorrections &&
+      shouldShowCorrectedOutputSection({
+        observationId,
+        outputCorrection,
+        traceOutputCorrection,
+        trigger: "inline",
+      })
+    ) {
       result.push({
         key: "corrections",
         title: "Output correction",
@@ -540,7 +556,7 @@ function IOPreviewJSONInner({
         minHeight: "4px",
         // Add corrected output as footer when corrections are enabled
         renderFooter: () => (
-          <CorrectedOutputField
+          <CorrectedOutputSection
             // Don't hand the full oversized object to the diff dialog: it
             // `JSON.stringify`s `actualOutput` unmemoized in its render body on
             // every render (incl. every keystroke while editing a correction),
@@ -550,12 +566,15 @@ function IOPreviewJSONInner({
             // (and `effectiveOutput` stays decoded for the lazy viewer/probe).
             actualOutput={outputTooLarge ? undefined : effectiveOutput}
             actualOutputTooLarge={outputTooLarge}
-            existingCorrection={outputCorrection}
+            outputCorrection={outputCorrection}
+            traceOutputCorrection={traceOutputCorrection}
             observationId={observationId}
             projectId={projectId}
             traceId={traceId}
             environment={environment}
-            compact={true}
+            compact
+            trigger="inline"
+            embedded
           />
         ),
       });
@@ -581,6 +600,7 @@ function IOPreviewJSONInner({
     }
     return result;
   }, [
+    isDark,
     showInput,
     showOutput,
     status,
@@ -605,6 +625,7 @@ function IOPreviewJSONInner({
     showCorrections,
     observationId,
     outputCorrection,
+    traceOutputCorrection,
     projectId,
     traceId,
     environment,
@@ -615,7 +636,7 @@ function IOPreviewJSONInner({
     return (
       <div className="flex min-h-0 flex-1 flex-col border-t border-b">
         <div className="flex h-full items-center justify-center">
-          <div className="text-muted-foreground text-sm">Parsing data...</div>
+          <div className="text-muted-foreground text-base">Parsing data...</div>
         </div>
       </div>
     );
@@ -650,8 +671,11 @@ function IOPreviewJSONInner({
   return (
     <div className="ph-no-capture flex min-h-0 flex-1 flex-col border-t border-b">
       {/* Inline comment bubble - shows when text is selected */}
-      {enableInlineComments && (
-        <InlineCommentBubble onAddComment={handleAddComment} />
+      {enableInlineComments && inlineCommentPositionRect && (
+        <InlineCommentBubble
+          onAddComment={handleAddComment}
+          positionRect={inlineCommentPositionRect}
+        />
       )}
 
       {/* Header - matches LogViewToolbar styling */}
@@ -698,7 +722,7 @@ function IOPreviewJSONInner({
               onClick={handlePreviousMatch}
               title="Previous match (Shift+Enter)"
             >
-              <ChevronUp className="h-3.5 w-3.5" />
+              <ChevronUp size="base" color="default" />
             </Button>
             <Button
               variant="ghost"
@@ -707,7 +731,7 @@ function IOPreviewJSONInner({
               onClick={handleNextMatch}
               title="Next match (Enter)"
             >
-              <ChevronDown className="h-3.5 w-3.5" />
+              <ChevronDown size="base" color="default" />
             </Button>
           </>
         )}
@@ -731,7 +755,7 @@ function IOPreviewJSONInner({
           onClick={handleCopy}
           title="Copy to clipboard"
         >
-          <Copy className="h-3.5 w-3.5" />
+          <Copy size="base" color="default" />
         </Button>
       </div>
 
@@ -752,24 +776,32 @@ function IOPreviewJSONInner({
           </span>
         ))}
         {needsVirtualization && (
-          <HoverCard>
-            <HoverCardTrigger asChild>
-              <span className="bg-muted text-muted-foreground ml-auto cursor-help rounded px-1.5 py-px text-[10px] font-bold">
+          <HoverCard
+            placement="bottom-end"
+            content={
+              <div className="w-80 p-3">
+                <div className="space-y-2">
+                  <p className="text-base font-bold">Virtualized View</p>
+                  <p className="text-muted-foreground text-xs">
+                    This view is using virtualization due to a large number of
+                    keys ({rowCounts.input.toLocaleString()} input,{" "}
+                    {rowCounts.output.toLocaleString()} output,{" "}
+                    {rowCounts.metadata.toLocaleString()} metadata). Only
+                    visible rows are rendered for optimal performance.
+                  </p>
+                </div>
+              </div>
+            }
+          >
+            {({ getTriggerProps }) => (
+              <span
+                className="bg-muted text-muted-foreground ml-auto cursor-help rounded px-1.5 py-px text-[10px] font-bold"
+                tabIndex={0}
+                {...getTriggerProps()}
+              >
                 Virtualized
               </span>
-            </HoverCardTrigger>
-            <HoverCardContent className="w-80" side="bottom" align="end">
-              <div className="space-y-2">
-                <p className="text-sm font-bold">Virtualized View</p>
-                <p className="text-muted-foreground text-xs">
-                  This view is using virtualization due to a large number of
-                  keys ({rowCounts.input.toLocaleString()} input,{" "}
-                  {rowCounts.output.toLocaleString()} output,{" "}
-                  {rowCounts.metadata.toLocaleString()} metadata). Only visible
-                  rows are rendered for optimal performance.
-                </p>
-              </div>
-            </HoverCardContent>
+            )}
           </HoverCard>
         )}
       </div>

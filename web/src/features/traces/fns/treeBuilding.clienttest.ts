@@ -84,6 +84,123 @@ const createMockTrace = (overrides: Record<string, unknown> = {}) => ({
 });
 
 describe("buildTraceUiData", () => {
+  describe("session scope", () => {
+    it("orders traces chronologically using one time origin without changing the input", () => {
+      const early = createMockTrace({
+        id: "early",
+        rootObservationType: "SPAN",
+        rootObservationId: "early-root",
+      });
+      const late = createMockTrace({
+        id: "late",
+        timestamp: new Date("2024-01-01T00:00:10.000Z"),
+        rootObservationType: "SPAN",
+        rootObservationId: "late-root",
+      });
+      const observations = [
+        createMockObservation({
+          id: "late-root",
+          traceId: "late",
+          startTime: late.timestamp,
+          endTime: new Date("2024-01-01T00:00:11.000Z"),
+        }),
+        createMockObservation({ id: "early-root", traceId: "early" }),
+        createMockObservation({
+          id: "child",
+          traceId: "early",
+          parentObservationId: "early-root",
+          startTime: new Date("2024-01-01T00:00:00.500Z"),
+        }),
+      ];
+      const result = buildTraceUiData(late, observations, [late, early]);
+      expect(result.roots.map((root) => root.id)).toEqual([
+        "trace-early",
+        "trace-late",
+      ]);
+      expect(result.nodeMap.get("late-root")?.startTimeSinceTrace).toBe(10_000);
+      expect(result.nodeMap.get("child")?.startTimeSinceParentStart).toBe(500);
+      expect(result.nodeMap.get("child")?.traceId).toBe("early");
+      expect(result.searchItems.map((item) => item.node.id)).toEqual([
+        "trace-early",
+        "early-root",
+        "child",
+        "trace-late",
+        "late-root",
+      ]);
+      expect(observations[0].startTime).toEqual(late.timestamp);
+      expect(
+        buildTraceUiData(
+          late,
+          observations.filter((o) => o.traceId === "late"),
+        ).nodeMap.get("late-root")?.startTimeSinceTrace,
+      ).toBe(0);
+    });
+
+    it("does not attach an observation to a parent in another trace", () => {
+      const first = createMockTrace({
+        id: "first",
+        rootObservationType: "SPAN",
+      });
+      const second = createMockTrace({
+        id: "second",
+        rootObservationType: "SPAN",
+      });
+      const result = buildTraceUiData(
+        first,
+        [
+          createMockObservation({ id: "root", traceId: "first" }),
+          createMockObservation({
+            id: "orphan",
+            traceId: "second",
+            parentObservationId: "root",
+          }),
+        ],
+        [first, second],
+      );
+      expect(result.roots.map((root) => root.id)).toEqual([
+        "trace-first",
+        "trace-second",
+      ]);
+      expect(result.nodeMap.get("root")?.children).toEqual([]);
+      expect(result.nodeMap.get("orphan")?.traceId).toBe("second");
+    });
+
+    it("handles an empty session", () => {
+      const result = buildTraceUiData(createMockTrace(), [], []);
+      expect(result.roots).toEqual([]);
+      expect(result.searchItems).toEqual([]);
+      expect(result.nodeMap.size).toBe(0);
+    });
+
+    it("keeps colliding observation ids in different traces independently selectable", () => {
+      const first = createMockTrace({
+        id: "first",
+        rootObservationType: "SPAN",
+      });
+      const second = createMockTrace({
+        id: "second",
+        rootObservationType: "SPAN",
+      });
+      const result = buildTraceUiData(
+        first,
+        [
+          createMockObservation({ id: "root", traceId: "first" }),
+          createMockObservation({ id: "root", traceId: "second" }),
+        ],
+        [first, second],
+      );
+      expect(result.nodeMap.get("first:root")).toMatchObject({
+        observationId: "root",
+        traceId: "first",
+      });
+      expect(result.nodeMap.get("second:root")).toMatchObject({
+        observationId: "root",
+        traceId: "second",
+      });
+      expect(result.roots[0].children[0].id).toBe("first:root");
+      expect(result.roots[1].children[0].id).toBe("second:root");
+    });
+  });
   describe("Traditional traces (single TRACE root)", () => {
     it("creates roots array with TRACE as single root and observations as children", () => {
       const trace = createMockTrace({ id: "trace-1", name: "Test Trace" });
@@ -204,8 +321,11 @@ describe("buildTraceUiData", () => {
       expect(result.searchItems[1].observationId).toBe("obs-1");
       expect(result.searchItems[2].observationId).toBe("obs-2");
 
-      // All items should have parent duration for heatmap
-      expect(result.searchItems[0].parentTotalDuration).toBe(2000); // 2s * 1000ms
+      // Trace root and its lone top-level span are the whole trace; the
+      // nested observation compares against the trace duration.
+      expect(result.searchItems[0].emphasis).toBeUndefined();
+      expect(result.searchItems[1].emphasis).toBeUndefined();
+      expect(result.searchItems[2].emphasis?.traceTotalDurationMs).toBe(2000); // 2s * 1000ms
     });
 
     it("returns empty children for trace with no observations", () => {
@@ -778,7 +898,7 @@ describe("buildTraceUiData", () => {
       expect(result.roots[0].totalCost?.equals(new Decimal(0.8))).toBe(true);
     });
 
-    it("propagates trace totalCost to all searchItems as parentTotalCost", () => {
+    it("searchItems compare against the trace totalCost, except rows that are the whole trace", () => {
       const trace = createMockTrace();
       const observations: ObservationReturnType[] = [
         createMockObservation({
@@ -795,14 +915,19 @@ describe("buildTraceUiData", () => {
 
       const result = buildTraceUiData(trace, observations);
 
-      // All searchItems should have the trace's total cost as parentTotalCost
       const traceTotalCost = result.roots[0].totalCost;
       expect(traceTotalCost).toBeDefined();
 
-      result.searchItems.forEach((item) => {
-        expect(item.parentTotalCost).toBeDefined();
-        expect(item.parentTotalCost?.equals(traceTotalCost!)).toBe(true);
+      const [traceItem, ...observationItems] = result.searchItems;
+      expect(traceItem.emphasis).toBeUndefined();
+      observationItems.forEach((item) => {
+        expect(item.emphasis?.traceTotalCost?.equals(traceTotalCost!)).toBe(
+          true,
+        );
       });
+
+      const single = buildTraceUiData(trace, [observations[0]]);
+      expect(single.searchItems[1].emphasis).toBeUndefined();
     });
 
     it("handles zero costs correctly in hierarchy (should not propagate)", () => {

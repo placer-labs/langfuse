@@ -153,12 +153,15 @@ const printDoctor = (
     return;
   }
   for (const check of result.checks) {
-    const icon =
-      check.status === "pass"
-        ? "PASS"
-        : check.status === "warn"
-          ? "WARN"
-          : "FAIL";
+    const icon = (() => {
+      if (check.status === "pass") {
+        return "PASS";
+      }
+      if (check.status === "warn") {
+        return "WARN";
+      }
+      return "FAIL";
+    })();
     console.log(`${icon}  ${check.name.padEnd(22)} ${check.detail}`);
     if (check.fix && check.status !== "pass") {
       console.log(`      fix: ${check.fix}`);
@@ -294,7 +297,7 @@ const main = async (): Promise<number> => {
     },
   };
 
-  if (!ctx.dryRun) {
+  if (!ctx.dryRun && scenario.target !== "api") {
     await preflight({
       projectId: ctx.projectId,
       needV4: scenario.supportsV4 && params["v4"] === true,

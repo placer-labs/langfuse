@@ -1,4 +1,6 @@
+/* eslint-disable @typescript-eslint/no-use-before-define */
 import { auditLog } from "@/src/features/audit-logs/auditLog";
+import { recordTrpcAccess } from "@/src/features/audit-logs/server/recordAccessEvent";
 import { env } from "@/src/env.mjs";
 import { parseBatchExportFileKeyFromUrl } from "@/src/features/batch-exports/server/batchExportFileKey";
 import { getBatchExportStorageServiceClient } from "@/src/features/batch-exports/server/getBatchExportStorageClient";
@@ -16,6 +18,7 @@ import {
   protectedProjectProcedure,
 } from "@/src/server/api/trpc";
 import {
+  BATCH_EXPORT_ABANDONED_AFTER_MS,
   BatchExportStatus,
   BatchExportTableName,
   CreateBatchExportSchema,
@@ -23,7 +26,7 @@ import {
   LangfuseNotFoundError,
   paginationZod,
 } from "@langfuse/shared";
-import { type Prisma } from "@langfuse/shared/src/db";
+import { type Prisma, type PrismaClient } from "@langfuse/shared/src/db";
 import {
   BatchExportQueue,
   logger,
@@ -55,7 +58,8 @@ const canReadAuditLogs = (session: AuthedSession, projectId: string) =>
     entitlement: "audit-logs",
     sessionUser: session.user,
     projectId,
-  }) && hasProjectAccess({ session, projectId, scope: "auditLogs:read" });
+  }) &&
+  hasProjectAccess({ session, projectId, scope: "projectAuditLogs:read" });
 
 // An audit-log export holds actor identifiers and admin actions, so reading
 // one needs the audit-log gates too, not just the batch-export ones.
@@ -65,8 +69,16 @@ const assertCanReadAuditLogs = (session: AuthedSession, projectId: string) => {
     sessionUser: session.user,
     projectId,
   });
-  throwIfNoProjectAccess({ session, projectId, scope: "auditLogs:read" });
+  throwIfNoProjectAccess({
+    session,
+    projectId,
+    scope: "projectAuditLogs:read",
+  });
 };
+
+/** Formats a timestamp as "YYYY-MM-DD HH:mm UTC" for server-rendered messages. */
+const formatUtc = (date: Date) =>
+  `${date.toISOString().slice(0, 16).replace("T", " ")} UTC`;
 
 const isDownloadWindowExpired = (batchExport: {
   finishedAt: Date | null;
@@ -115,6 +127,8 @@ export const batchExportRouter = createTRPCRouter({
         logger.info("[BATCH EXPORT] Creating export job", { job: input });
         const userId = ctx.session.user.id;
 
+        await assertNoActiveExport({ prisma: ctx.prisma, projectId, userId });
+
         // Create export job
         const exportJob = await ctx.prisma.batchExport.create({
           data: {
@@ -137,15 +151,23 @@ export const batchExportRouter = createTRPCRouter({
           after: exportJob,
         });
 
-        // Notify worker
-        await BatchExportQueue.getInstance()?.add(QueueJobs.BatchExportJob, {
-          id: exportJob.id, // Use the batchExportId to deduplicate when the same job is sent multiple times
-          name: QueueJobs.BatchExportJob,
-          timestamp: new Date(),
-          payload: {
-            batchExportId: exportJob.id,
-            projectId,
-          },
+        await startExportOrMarkFailed({
+          prisma: ctx.prisma,
+          projectId,
+          batchExportId: exportJob.id,
+          // Recorded when the export is queued: its rows are only known once
+          // the worker has written the file to batch-export storage, so the
+          // event has no result count. Downloading that file is recorded as
+          // the batchExport `download` change event.
+          recordAccess: () =>
+            recordTrpcAccess(ctx, projectId, {
+              route: "batchExport.create",
+              resourceType: "batchExport",
+              resourceId: exportJob.id,
+              action: "export",
+              resourceRefs: [],
+              params: { ...input, destination: "batch-export" },
+            }),
         });
       } catch (e) {
         logger.error("[BATCH EXPORT] Failed to create export job", e);
@@ -172,10 +194,13 @@ export const batchExportRouter = createTRPCRouter({
         scope: "batchExports:create",
       });
 
-      await ctx.prisma.batchExport.update({
+      const { count } = await ctx.prisma.batchExport.updateMany({
         where: { id: input.batchExportId, projectId: input.projectId },
         data: { status: BatchExportStatus.CANCELLED },
       });
+      if (count === 0) {
+        throw new LangfuseNotFoundError("Batch export not found");
+      }
     }),
   downloadUrl: protectedProjectProcedure
     .input(
@@ -341,3 +366,70 @@ export const batchExportRouter = createTRPCRouter({
       };
     }),
 });
+
+/** Rejects a new export while the user still has a queued or running one in the project. */
+const assertNoActiveExport = async ({
+  prisma,
+  projectId,
+  userId,
+}: {
+  prisma: PrismaClient;
+  projectId: string;
+  userId: string;
+}) => {
+  const activeExport = await prisma.batchExport.findFirst({
+    where: {
+      projectId,
+      userId,
+      status: { in: [BatchExportStatus.QUEUED, BatchExportStatus.PROCESSING] },
+      updatedAt: {
+        gte: new Date(Date.now() - BATCH_EXPORT_ABANDONED_AFTER_MS),
+      },
+    },
+    select: { createdAt: true },
+    orderBy: { createdAt: "asc" },
+  });
+  if (activeExport) {
+    throw new TRPCError({
+      code: "CONFLICT",
+      message: `Your export started at ${formatUtc(activeExport.createdAt)} is still running. Wait for it to finish or cancel it under Settings > Exports.`,
+    });
+  }
+};
+
+/**
+ * Records the export as an access event, then queues its job. Marks the row
+ * FAILED if either throws, so an unrecorded export never runs and the row does
+ * not block a retry.
+ */
+const startExportOrMarkFailed = async ({
+  prisma,
+  projectId,
+  batchExportId,
+  recordAccess,
+}: {
+  prisma: PrismaClient;
+  projectId: string;
+  batchExportId: string;
+  recordAccess: () => Promise<void>;
+}) => {
+  try {
+    await recordAccess();
+    await BatchExportQueue.getInstance()?.add(QueueJobs.BatchExportJob, {
+      id: batchExportId, // Use the batchExportId to deduplicate when the same job is sent multiple times
+      name: QueueJobs.BatchExportJob,
+      timestamp: new Date(),
+      payload: { batchExportId, projectId },
+    });
+  } catch (startError) {
+    await prisma.batchExport.update({
+      where: { id: batchExportId, projectId },
+      data: {
+        status: BatchExportStatus.FAILED,
+        finishedAt: new Date(),
+        log: "The export could not be queued. Please try again.",
+      },
+    });
+    throw startError;
+  }
+};
