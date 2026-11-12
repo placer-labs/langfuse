@@ -28,6 +28,8 @@ import { toolRegistry } from "./registry";
 import { registerSkillResources } from "./skills/resources";
 import { contextWithLangfuseProps, logger } from "@langfuse/shared/src/server";
 import { context as otelContext } from "@opentelemetry/api";
+import { PROJECT_ID_ARG } from "./auth/oidc";
+import { LIST_PROJECTS_TOOL } from "./projects/tools/listProjects";
 
 const MCP_SERVER_NAME = "langfuse";
 
@@ -88,7 +90,10 @@ export function createMcpServer(context: ServerContext): Server {
 
   // ListTools handler - dynamically load from registry
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const tools = await toolRegistry.getToolDefinitions(context);
+    const tools = withProjectIdArg(
+      await toolRegistry.getToolDefinitions(context),
+      context,
+    );
 
     logger.debug("MCP ListTools", {
       projectId: context.projectId,
@@ -118,6 +123,33 @@ export function createMcpServer(context: ServerContext): Server {
 
     assertToolAuthorized(registeredTool.definition, context);
 
+    let toolArgs = args;
+    if (context.authMethod === "oidc") {
+      const { [PROJECT_ID_ARG]: requested, ...rest } = args ?? {};
+      if (requested !== undefined && requested !== context.projectId) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `${PROJECT_ID_ARG} must be set per tools/call request, not in a batch`,
+        );
+      }
+      if (
+        requested === undefined &&
+        context.projectDefaulted &&
+        name !== LIST_PROJECTS_TOOL
+      ) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `You can access several Langfuse projects. Pass ${PROJECT_ID_ARG}; call ${LIST_PROJECTS_TOOL} to see them.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+      toolArgs = rest;
+    }
+
     // Execute handler with context
     // Handler validates input; errors are formatted only at this boundary.
     const clickHouseCtx = contextWithLangfuseProps({
@@ -130,7 +162,7 @@ export function createMcpServer(context: ServerContext): Server {
     });
     try {
       const result = await otelContext.with(clickHouseCtx, () =>
-        registeredTool.handler(args, context),
+        registeredTool.handler(toolArgs, context),
       );
 
       return {
@@ -154,6 +186,31 @@ export function createMcpServer(context: ServerContext): Server {
   });
 
   return server;
+}
+
+// OIDC users pick a project per tool call.
+function withProjectIdArg(
+  tools: ToolDefinition[],
+  context: ServerContext,
+): ToolDefinition[] {
+  if (context.authMethod !== "oidc") return tools;
+  return tools.map((tool) =>
+    tool.name === LIST_PROJECTS_TOOL
+      ? tool
+      : {
+          ...tool,
+          inputSchema: {
+            ...tool.inputSchema,
+            properties: {
+              ...(tool.inputSchema.properties as Record<string, unknown>),
+              [PROJECT_ID_ARG]: {
+                type: "string",
+                description: `Langfuse project id, from ${LIST_PROJECTS_TOOL}. Optional if you can access only one project.`,
+              },
+            },
+          },
+        },
+  );
 }
 
 /** assertToolAuthorized reports enforce-mode denials as MCP errors. */

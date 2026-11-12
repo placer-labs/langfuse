@@ -30,7 +30,7 @@ vi.mock("@langfuse/shared/src/db", () => ({
   prisma: {
     user: { findUnique: vi.fn() },
     project: { findUnique: vi.fn() },
-    organizationMembership: { findUnique: vi.fn() },
+    organizationMembership: { findUnique: vi.fn(), findMany: vi.fn() },
   },
 }));
 
@@ -270,6 +270,7 @@ describe("MCP OIDC auth — user and project resolution", () => {
     ({ headers }) as unknown as NextApiRequest;
 
   beforeEach(async () => {
+    vi.clearAllMocks();
     keys = await makeKeys();
     const jose = await import("jose");
     const actual = await vi.importActual<typeof Jose>("jose");
@@ -487,6 +488,116 @@ describe("MCP OIDC auth — user and project resolution", () => {
       }
     },
   );
+
+  const memberships = (
+    orgs: {
+      orgId?: string;
+      role: string;
+      projects: string[];
+      projectRoles?: Record<string, string>;
+    }[],
+  ) =>
+    orgs.map(({ orgId = ORG_ID, role, projects, projectRoles = {} }) => ({
+      orgId,
+      role,
+      ProjectMemberships: Object.entries(projectRoles).map(
+        ([projectId, projectRole]) => ({ projectId, role: projectRole }),
+      ),
+      organization: {
+        projects: projects.map((name) => ({ id: `prj_${name}`, name })),
+      },
+    }));
+
+  const toolCall = (args: Record<string, unknown>) =>
+    ({
+      headers: {},
+      body: {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "listPrompts", arguments: args },
+      },
+    }) as unknown as NextApiRequest;
+
+  it("takes the project from the tool call's projectId over the header", async () => {
+    const { prisma } = await import("@langfuse/shared/src/db");
+    const { resolveOidcContextFromRequest } =
+      await import("@/src/features/mcp/server/auth/oidc");
+    const req = toolCall({ projectId: "prj_arg" });
+    req.headers["x-langfuse-project-id"] = PROJECT_ID;
+    const context = await resolveOidcContextFromRequest(
+      req,
+      await gatewayToken(),
+    );
+    expect(context.projectId).toBe("prj_arg");
+    expect(context.projectDefaulted).toBe(false);
+    expect(prisma.project.findUnique).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: "prj_arg" } }),
+    );
+  });
+
+  it.each([
+    ["one accessible project", [["alpha"]], "prj_alpha", false],
+    [
+      "several, picking the first by name",
+      [["zulu", "bravo"]],
+      "prj_bravo",
+      true,
+    ],
+  ] as const)(
+    "defaults the project with %s",
+    async (_label, [projects], expectedProject, defaulted) => {
+      const { prisma } = await import("@langfuse/shared/src/db");
+      vi.mocked(prisma.organizationMembership.findMany).mockResolvedValue(
+        memberships([{ role: "VIEWER", projects: [...projects] }]) as never,
+      );
+      const { resolveOidcContextFromRequest } =
+        await import("@/src/features/mcp/server/auth/oidc");
+      const context = await resolveOidcContextFromRequest(
+        request({}),
+        await gatewayToken(),
+      );
+      expect(context.projectId).toBe(expectedProject);
+      expect(context.projectDefaulted).toBe(defaulted);
+      expect(prisma.project.findUnique).not.toHaveBeenCalled();
+    },
+  );
+
+  it("denies a user with no accessible projects", async () => {
+    const { prisma } = await import("@langfuse/shared/src/db");
+    vi.mocked(prisma.organizationMembership.findMany).mockResolvedValue(
+      memberships([
+        { role: "MEMBER", projects: ["a"], projectRoles: { prj_a: "NONE" } },
+        { orgId: "org_2", role: "AI_GATEWAY", projects: ["b"] },
+      ]) as never,
+    );
+    const { resolveOidcContextFromRequest } =
+      await import("@/src/features/mcp/server/auth/oidc");
+    await expect(
+      resolveOidcContextFromRequest(request({}), await gatewayToken()),
+    ).rejects.toThrow("OIDC authentication failed");
+  });
+
+  it("lists projects across orgs with the effective role", async () => {
+    const { prisma } = await import("@langfuse/shared/src/db");
+    vi.mocked(prisma.organizationMembership.findMany).mockResolvedValue(
+      memberships([
+        {
+          role: "VIEWER",
+          projects: ["b", "a", "hidden"],
+          projectRoles: { prj_a: "ADMIN", prj_hidden: "NONE" },
+        },
+        { orgId: "org_2", role: "MEMBER", projects: ["c"] },
+      ]) as never,
+    );
+    const { listAccessibleProjects } =
+      await import("@/src/features/mcp/server/auth/oidc");
+    expect(await listAccessibleProjects("user_1")).toEqual([
+      { id: "prj_a", name: "a", orgId: ORG_ID, role: "ADMIN" },
+      { id: "prj_b", name: "b", orgId: ORG_ID, role: "VIEWER" },
+      { id: "prj_c", name: "c", orgId: "org_2", role: "MEMBER" },
+    ]);
+  });
 
   it("refuses OIDC outside enforce mode", async () => {
     const { env } = await import("@/src/env.mjs");

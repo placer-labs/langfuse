@@ -1,7 +1,9 @@
 /**
  * OIDC bearer-token auth for the MCP endpoint: verifies the JWT against the
  * issuer's JWKS, maps its verified email to a Langfuse user, and authorizes
- * the `X-Langfuse-Project-Id` project by the user's project or org role.
+ * the requested project by the user's project or org role. The project comes
+ * from the tool call's `projectId` argument, then `X-Langfuse-Project-Id`,
+ * then the user's first accessible project.
  */
 
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
@@ -30,6 +32,7 @@ import {
 } from "@/src/features/auth/policy/types";
 
 const PROJECT_ID_HEADER = "x-langfuse-project-id";
+export const PROJECT_ID_ARG = "projectId";
 
 type CachedJwks = {
   issuer: string;
@@ -158,6 +161,63 @@ function userAuthorizationContext(
   };
 }
 
+export type AccessibleProject = {
+  id: string;
+  name: string;
+  orgId: string;
+  role: Role;
+};
+
+export async function listAccessibleProjects(
+  userId: string,
+): Promise<AccessibleProject[]> {
+  const memberships = await prisma.organizationMembership.findMany({
+    where: { userId },
+    select: {
+      orgId: true,
+      role: true,
+      ProjectMemberships: { select: { projectId: true, role: true } },
+      organization: {
+        select: {
+          projects: {
+            where: { deletedAt: null },
+            select: { id: true, name: true },
+          },
+        },
+      },
+    },
+  });
+  return memberships
+    .flatMap((membership) =>
+      membership.organization.projects.map((project) => ({
+        id: project.id,
+        name: project.name,
+        orgId: membership.orgId,
+        role:
+          membership.ProjectMemberships.find(
+            (pm) => pm.projectId === project.id,
+          )?.role ?? membership.role,
+      })),
+    )
+    .filter(
+      (project) => project.role !== "NONE" && project.role !== "AI_GATEWAY",
+    )
+    .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+}
+
+// A single (non-batch) tools/call carries its project as a tool argument.
+function requestedProjectId(req: NextApiRequest): string | undefined {
+  const body = req.body as
+    | { method?: unknown; params?: { arguments?: Record<string, unknown> } }
+    | undefined;
+  if (body && !Array.isArray(body) && body.method === "tools/call") {
+    const arg = body.params?.arguments?.[PROJECT_ID_ARG];
+    if (typeof arg === "string" && arg.length > 0) return arg;
+  }
+  const header = req.headers[PROJECT_ID_HEADER];
+  return (Array.isArray(header) ? header[0] : header) || undefined;
+}
+
 export async function resolveOidcContextFromRequest(
   req: NextApiRequest,
   token: string,
@@ -172,22 +232,16 @@ export async function resolveOidcContextFromRequest(
   const payload = await verifyOidcToken(token);
   const email = extractVerifiedEmail(payload);
 
-  const projectHeader = req.headers[PROJECT_ID_HEADER];
-  const projectId = Array.isArray(projectHeader)
-    ? projectHeader[0]
-    : projectHeader;
-  if (!projectId) {
-    throw new UnauthorizedError(
-      `OIDC authentication requires the '${PROJECT_ID_HEADER}' request header`,
-    );
-  }
+  let projectId = requestedProjectId(req);
 
-  const [user, project] = await Promise.all([
+  const [user, requestedProject] = await Promise.all([
     prisma.user.findUnique({ where: { email }, select: { id: true } }),
-    prisma.project.findUnique({
-      where: { id: projectId },
-      select: { orgId: true, deletedAt: true },
-    }),
+    projectId
+      ? prisma.project.findUnique({
+          where: { id: projectId },
+          select: { orgId: true, deletedAt: true },
+        })
+      : null,
   ]);
 
   if (!user) {
@@ -195,6 +249,21 @@ export async function resolveOidcContextFromRequest(
       projectId,
     });
     throw new ForbiddenError(OIDC_ACCESS_DENIED);
+  }
+
+  let project = requestedProject;
+  let projectDefaulted = false;
+  if (!projectId) {
+    const [first, ...rest] = await listAccessibleProjects(user.id);
+    if (!first) {
+      logger.info("MCP OIDC auth: user has no accessible projects", {
+        userId: user.id,
+      });
+      throw new ForbiddenError(OIDC_ACCESS_DENIED);
+    }
+    projectId = first.id;
+    project = { orgId: first.orgId, deletedAt: null };
+    projectDefaulted = rest.length > 0;
   }
 
   // A project role overrides the org role, as in the web UI.
@@ -279,5 +348,6 @@ export async function resolveOidcContextFromRequest(
     userAgent: req.headers["user-agent"],
     auth: userAuthorizationContext(user.id, role, principalOrg, projectId),
     authMethod: "oidc",
+    projectDefaulted,
   };
 }
