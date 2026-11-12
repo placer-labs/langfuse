@@ -81,6 +81,9 @@ export interface ServerContext {
    *   `oidc`) so downstream audit-log and public-API consumers keep working.
    */
   authMethod?: "api-key" | "oidc";
+
+  /** OIDC only: no project was requested and the user can access several. */
+  projectDefaulted?: boolean;
 }
 
 /** In-app agent MCP access is read-only unless a prior approval mints a mutating-tool allowlist. */
