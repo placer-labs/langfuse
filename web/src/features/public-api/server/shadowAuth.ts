@@ -292,12 +292,20 @@ function toResourceId(resource: Resource): ResourceId {
     : OrganizationId(resource.orgId);
 }
 
-/** tenantFor is the resource's tenant: an org resource is its own tenant; a per-item project is scoped to the key's already-resolved bound org. Admin carries no tenant and the PDP grants it directly. */
+/** tenantFor is the resource's tenant: an org resource is its own tenant; a per-item project is scoped to the key's already-resolved bound org, or to the user's org that owns it. Admin carries no tenant and the PDP grants it directly. */
 function tenantFor(ctx: AuthorizationContext, resource: Resource): TenantId {
   if ("orgId" in resource) return OrganizationId(resource.orgId);
-  const boundOrg =
-    ctx.principal.kind === "apiKey" ? ctx.principal.boundResource.orgId : "";
-  return OrganizationId(boundOrg);
+  const { principal } = ctx;
+  if (principal.kind === "apiKey") {
+    return OrganizationId(principal.boundResource.orgId);
+  }
+  const owningOrg =
+    principal.kind === "user"
+      ? principal.organizations.find((o) =>
+          o.projectIds.includes(resource.projectId),
+        )?.orgId
+      : undefined;
+  return OrganizationId(owningOrg ?? "");
 }
 
 /** ShadowAuthParams is enforceAuth's params plus the access levels the legacy verify gates on. */

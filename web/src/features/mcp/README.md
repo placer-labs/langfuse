@@ -114,6 +114,69 @@ Clients like Claude Code can use these annotations to:
 
 All write operations should audit-log entries with before/after snapshots.
 
+### OIDC Bearer Authentication (self-hosted)
+
+Self-hosted deployments can additionally accept OIDC bearer JWTs from a
+configured identity provider, so MCP clients authenticate as a real Langfuse
+user rather than via a shared static API key.
+
+**Enabling:**
+
+```bash
+MCP_AUTH_OIDC_ENABLED=true
+MCP_AUTH_OIDC_ISSUER=https://idp.example.com
+MCP_AUTH_OIDC_AUDIENCE=langfuse-mcp        # required; `aud` must match
+MCP_AUTH_OIDC_JWKS_URI=                    # optional; defaults to jwks_uri from <issuer>/.well-known/openid-configuration
+MCP_AUTH_OIDC_ALLOWED_EMAIL_DOMAINS=example.com   # optional; comma-separated, unset allows any domain
+```
+
+OIDC is refused unless `API_AUTH_MIGRATION=enforce` (the default), so every
+tool call is checked against the user's project role. Users are matched
+by the token's `email`, which must carry `email_verified: true`.
+
+The email is the identity: anyone who can get the issuer to sign a token
+with a user's email acts as that user. Only point this at an issuer whose
+emails are managed by your organization, not self-service, and set
+`MCP_AUTH_OIDC_ALLOWED_EMAIL_DOMAINS` to your domains.
+
+The bearer token must carry `email` and `email_verified`. Some IdPs leave
+these out of access tokens by default and need a claim mapper.
+
+**Request flow:**
+
+```
+1. Client sends:
+     Authorization: Bearer <JWT>
+     X-Langfuse-Project-Id: <projectId>
+   ↓
+2. JWT verified against MCP_AUTH_OIDC_ISSUER via its JWKS
+   (issuer + audience checked)
+   ↓
+3. Resolve Langfuse user by the token's verified `email`
+   ↓
+4. Require access to the requested projectId: a project role, or else
+   the user's organization role
+   ↓
+5. Build ServerContext with the real userId; apiKeyId is
+   synthesized as `oidc:<userId>` for audit-log compatibility
+```
+
+The user must already exist in Langfuse and be a member of the target
+project — users are not auto-provisioned from JWT claims.
+
+**Both auth methods are served concurrently** by the same endpoint. The
+dispatch is per-request, based on the `Authorization` header scheme:
+
+| Authorization header | OIDC enabled? | Path taken            | Typical caller       |
+| -------------------- | ------------- | --------------------- | -------------------- |
+| `Bearer <JWT>`       | yes           | OIDC                  | Human user via IdP   |
+| `Bearer <JWT>`       | no            | rejected (Basic only) | —                    |
+| `Basic <base64>`     | either        | API key (existing)    | Service / agent / CI |
+
+So a single deployment can authenticate human users via SSO **and**
+automated processes via project API keys at the same time — there is no
+migration off API keys required to turn OIDC on.
+
 ---
 
 # Connecting Clients
