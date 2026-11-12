@@ -11,6 +11,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { generateKeyPair, exportJWK, SignJWT } from "jose";
 import type * as Jose from "jose";
+import type { NextApiRequest } from "next";
 
 const ISSUER = "https://idp.example.com";
 const AUDIENCE = "langfuse-mcp";
@@ -266,7 +267,7 @@ describe("MCP OIDC auth — user and project resolution", () => {
     });
 
   const request = (headers: Record<string, string>) =>
-    ({ headers }) as unknown as import("next").NextApiRequest;
+    ({ headers }) as unknown as NextApiRequest;
 
   beforeEach(async () => {
     keys = await makeKeys();
