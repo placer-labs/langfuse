@@ -147,22 +147,29 @@ these out of access tokens by default and need a claim mapper.
 ```
 1. Client sends:
      Authorization: Bearer <JWT>
-     X-Langfuse-Project-Id: <projectId>
    ↓
 2. JWT verified against MCP_AUTH_OIDC_ISSUER via its JWKS
    (issuer + audience checked)
    ↓
 3. Resolve Langfuse user by the token's verified `email`
    ↓
-4. Require access to the requested projectId: a project role, or else
-   the user's organization role
+4. Pick the project: the tool call's `projectId` argument, else the
+   X-Langfuse-Project-Id header, else the user's only project
    ↓
-5. Build ServerContext with the real userId; apiKeyId is
+5. Require access to that project: a project role, or else the user's
+   organization role
+   ↓
+6. Build ServerContext with the real userId; apiKeyId is
    synthesized as `oidc:<userId>` for audit-log compatibility
 ```
 
 The user must already exist in Langfuse and be a member of the target
 project — users are not auto-provisioned from JWT claims.
+
+OIDC sessions get an optional `projectId` argument on every tool and a
+`listProjects` tool that lists the user's projects and roles. A user with
+several projects must pass `projectId` on each call; with one project it
+can be omitted.
 
 **Both auth methods are served concurrently** by the same endpoint. The
 dispatch is per-request, based on the `Authorization` header scheme:
