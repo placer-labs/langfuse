@@ -23,9 +23,14 @@ export const requiredJobs = [
   "e2e-server-tests",
 ];
 
-// placer-labs fork: the AI gateway is not deployed here, so pipeline.yml runs
-// its jobs only in langfuse/langfuse and the gate accepts them as skipped.
-const upstreamOnlyJobs = ["tests-ai-gateway", "test-ai-gateway-e2e"];
+// placer-labs fork: pipeline.yml runs these jobs only in langfuse/langfuse
+// (the AI gateway is not deployed here, and the LLM connection tests need
+// upstream's provider secrets), so the gate accepts them as skipped.
+const upstreamOnlyJobs = [
+  "tests-ai-gateway",
+  "test-ai-gateway-e2e",
+  "test-worker-llm-connections",
+];
 
 export function evaluateGate({
   event,

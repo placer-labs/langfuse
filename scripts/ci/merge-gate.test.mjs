@@ -162,11 +162,12 @@ test("a duplicate push cannot excuse a failed job or a failed tag check", () => 
   );
 });
 
-test("placer-labs fork: upstream-only AI gateway jobs may skip outside langfuse/langfuse", () => {
+test("placer-labs fork: upstream-only jobs may skip outside langfuse/langfuse", () => {
   const needs = {
     ...successfulJobs(),
     "tests-ai-gateway": { result: "skipped" },
     "test-ai-gateway-e2e": { result: "skipped" },
+    "test-worker-llm-connections": { result: "skipped" },
   };
   for (const event of ["pull_request", "push", "merge_group"]) {
     assert.deepEqual(
@@ -178,6 +179,7 @@ test("placer-labs fork: upstream-only AI gateway jobs may skip outside langfuse/
     evaluateGate({ event: "push", needs, repository: "langfuse/langfuse" }),
     [
       "tests-ai-gateway: expected success, received skipped",
+      "test-worker-llm-connections: expected success, received skipped",
       "test-ai-gateway-e2e: expected success, received skipped",
     ],
   );
