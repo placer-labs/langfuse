@@ -156,8 +156,8 @@ these out of access tokens by default and need a claim mapper.
 4. Pick the project: the tool call's `projectId` argument, else the
    X-Langfuse-Project-Id header, else the user's only project
    ↓
-5. Require access to that project: a project role, or else the user's
-   organization role
+5. Require project:read on that project under the user's role assignments,
+   the same policies the web UI authorizes with
    ↓
 6. Build ServerContext with the real userId; apiKeyId is
    synthesized as `oidc:<userId>` for audit-log compatibility
@@ -183,6 +183,8 @@ dispatch is per-request, based on the `Authorization` header scheme:
 So a single deployment can authenticate human users via SSO **and**
 automated processes via project API keys at the same time — there is no
 migration off API keys required to turn OIDC on.
+
+Tools that return trace, observation, score or experiment data declare `accessAudit` on `defineTool` and report the returned rows through the handler's `audit` argument (`audit.refs`, `audit.count`). Each successful call is then recorded as an access event (`surface = mcp`, the tool name as route) for orgs that record access events, before the result is returned.
 
 ---
 

@@ -55,7 +55,7 @@ const authContext = (policies: Policy[]): AuthorizationContext => ({
     organizations: [],
     boundResource: { orgId: "org_1", projectId: PRJ },
   },
-  policies,
+  policies: [policies],
 });
 
 const params = (action: ApiAction, ctx: AuthorizationContext | undefined) => ({
@@ -111,7 +111,7 @@ describe("shadowAuthorize", () => {
             },
           ],
         },
-        policies: [allowPrompts],
+        policies: [[allowPrompts]],
       };
       const decision = shadowAuthorize({
         ...params("prompts:read", ctx),

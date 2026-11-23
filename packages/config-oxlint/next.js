@@ -1,3 +1,5 @@
+import { allowedPrismaWriters } from "./prismaWriters.js";
+
 export default {
   categories: { correctness: "off" },
   plugins: ["typescript", "react", "import", "jsx-a11y", "nextjs", "unicorn"],
@@ -178,8 +180,10 @@ export default {
             reportGlobalThis: false,
           },
         ],
+        "array-callback-return": "warn",
         "no-void": "warn",
         "no-else-return": "warn",
+        "default-case-last": "warn",
         "no-unneeded-ternary": "warn",
         "no-nested-ternary": "warn",
         "no-use-before-define": [
@@ -193,12 +197,7 @@ export default {
         "@repo/no-restricted-prisma-writes": [
           "warn",
           {
-            models: {
-              apiKey: ["packages/shared/src/server/auth/apiKeys.ts"],
-              roleAssignment: [
-                "packages/shared/src/features/rbac/roleAssignmentService.ts",
-              ],
-            },
+            models: allowedPrismaWriters,
           },
         ],
       },

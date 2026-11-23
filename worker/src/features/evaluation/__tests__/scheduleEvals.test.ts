@@ -15,7 +15,7 @@ import {
 } from "../observationEval/__tests__/fixtures";
 
 const mocks = vi.hoisted(() => ({
-  env: { LANGFUSE_TRACE_DISPATCH_SAMPLING_RATE: 0 },
+  env: {},
   topicsEnabled: vi.fn(),
   topicsActive: vi.fn(),
   createObservationDeps: vi.fn(),
@@ -36,7 +36,7 @@ vi.mock("@langfuse/shared/topics/server", () => ({
 vi.mock("../observationEval/createSchedulerDeps", () => ({
   createObservationEvalSchedulerDeps: mocks.createObservationDeps,
 }));
-vi.mock("../../traceBatching/traceRuleRecording", () => ({
+vi.mock("../../traceDispatch/traceRuleRecording", () => ({
   recordTraceActivity: async (projectId: string, events: unknown) =>
     mocks.record(projectId, structuredClone(events)),
 }));
@@ -73,7 +73,6 @@ const facetRule: EvalRules["traceTranscriptRules"][number] = {
 describe("scheduleEvals", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.env.LANGFUSE_TRACE_DISPATCH_SAMPLING_RATE = 0;
     mocks.topicsEnabled.mockReturnValue(true);
     mocks.topicsActive.mockResolvedValue(true);
     mocks.record.mockResolvedValue(undefined);
@@ -90,8 +89,14 @@ describe("scheduleEvals", () => {
       };
       const schedulerDeps = createEvalSchedulerDeps(projectId, rules);
       const observation = createTestObservation({ name: "selected" });
+      const buildFailureContext = () => ({
+        projectId,
+        observationId: observation.span_id,
+      });
       const selected = await scheduleEvals({
-        observation,
+        buildFailureContext,
+        parseObservation: () => observation,
+        environment: observation.environment,
         traceActivity: recordTraces
           ? Object.freeze(createTraceActivity(observation.trace_id))
           : undefined,
@@ -99,7 +104,13 @@ describe("scheduleEvals", () => {
         schedulerDeps,
       });
       const unmatched = await scheduleEvals({
-        observation: { ...observation, span_id: "child", name: "unmatched" },
+        buildFailureContext: () => ({ projectId, observationId: "child" }),
+        parseObservation: () => ({
+          ...observation,
+          span_id: "child",
+          name: "unmatched",
+        }),
+        environment: observation.environment,
         traceActivity: recordTraces
           ? createTraceActivity(
               observation.trace_id,
@@ -112,6 +123,21 @@ describe("scheduleEvals", () => {
       await schedulerDeps.flushTraceActivity();
 
       expect(observationDeps.enqueueEvalJob).toHaveBeenCalledTimes(2);
+      observationDeps.uploadObservationToS3.mockRejectedValueOnce(
+        new Error("Observation upload unavailable"),
+      );
+      await expect(
+        scheduleEvals({
+          buildFailureContext,
+          parseObservation: () => observation,
+          environment: observation.environment,
+          traceActivity: recordTraces
+            ? createTraceActivity(observation.trace_id)
+            : undefined,
+          rules,
+          schedulerDeps,
+        }),
+      ).resolves.toEqual(selected);
       // Matching holds rule IDs. It does not buffer them for Redis.
       expect(mocks.record).not.toHaveBeenCalled();
       if (recordTraces) {
@@ -121,6 +147,59 @@ describe("scheduleEvals", () => {
         expect(selected).toBeUndefined();
         expect(unmatched).toBeUndefined();
         expect(mocks.topicsActive).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it("records sampled traces without converting payloads when no rules need them", async () => {
+    const rules = { observationRules: [], traceTranscriptRules: [] };
+    const parseObservation = vi.fn(() => createTestObservation());
+    const buildFailureContext = vi.fn();
+    const matched = await scheduleEvals({
+      buildFailureContext,
+      parseObservation,
+      environment: "production",
+      traceActivity: createTraceActivity("trace"),
+      rules,
+      schedulerDeps: createEvalSchedulerDeps(projectId, rules),
+    });
+    expect(matched).toEqual([]);
+    expect(parseObservation).not.toHaveBeenCalled();
+    expect(buildFailureContext).not.toHaveBeenCalled();
+  });
+
+  it.each(["error", "warn"] as const)(
+    "keeps project and observation IDs when conversion fails (%s)",
+    async (level) => {
+      const error = new Error("Invalid observation");
+      const log = vi.spyOn(logger, level).mockImplementation(() => logger);
+      const rules: EvalRules = {
+        observationRules: level === "error" ? [createTestEvalConfig()] : [],
+        traceTranscriptRules: [facetRule],
+      };
+      try {
+        await scheduleEvals({
+          parseObservation: () => {
+            throw error;
+          },
+          buildFailureContext: () => ({
+            projectId,
+            observationId: "invalid-span",
+            fileKey: "batch.json",
+          }),
+          environment: "production",
+          traceActivity: createTraceActivity("trace"),
+          rules,
+          schedulerDeps: createEvalSchedulerDeps(projectId, rules),
+        });
+        expect(log).toHaveBeenCalledExactlyOnceWith(expect.any(String), {
+          error,
+          fileKey: "batch.json",
+          projectId,
+          observationId: "invalid-span",
+        });
+      } finally {
+        log.mockRestore();
       }
     },
   );
@@ -137,7 +216,15 @@ describe("scheduleEvals", () => {
     const matched = await Promise.all(
       [firstBatch, secondBatch].map((schedulerDeps, index) =>
         scheduleEvals({
-          observation: { ...observation, trace_id: `trace-${index}` },
+          buildFailureContext: () => ({
+            projectId,
+            observationId: observation.span_id,
+          }),
+          parseObservation: () => ({
+            ...observation,
+            trace_id: `trace-${index}`,
+          }),
+          environment: observation.environment,
           traceActivity: createTraceActivity(`trace-${index}`),
           rules,
           schedulerDeps,
@@ -231,7 +318,12 @@ describe("scheduleEvals", () => {
         for (const span_id of ["root", "child"]) {
           matchedRuleIds.push(
             await scheduleEvals({
-              observation: { ...observation, span_id },
+              buildFailureContext: () => ({
+                projectId,
+                observationId: span_id,
+              }),
+              parseObservation: () => ({ ...observation, span_id }),
+              environment: observation.environment,
               traceActivity: createTraceActivity(observation.trace_id),
               rules,
               schedulerDeps,

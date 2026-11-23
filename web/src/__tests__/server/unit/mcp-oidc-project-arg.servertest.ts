@@ -1,6 +1,8 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
+import {
+  Client,
+  InMemoryTransport,
+  ProtocolErrorCode,
+} from "@modelcontextprotocol/client";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { defineTool } from "@/src/features/mcp/core/define-tool";
@@ -140,7 +142,7 @@ describe("MCP OIDC projectId argument", () => {
           name: "echo",
           arguments: { name: "a", projectId: "project-2" },
         }),
-      ).rejects.toMatchObject({ code: ErrorCode.InvalidParams });
+      ).rejects.toMatchObject({ code: ProtocolErrorCode.InvalidParams });
     });
   });
 });

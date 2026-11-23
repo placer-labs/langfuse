@@ -4,7 +4,7 @@ import { expect, it } from "vitest";
 import { testFeatureFlags } from "@/src/__tests__/fixtures/feature-flags";
 import { canOpenPersonalFeaturePreviews } from "./canOpenPersonalFeaturePreviews";
 
-it("opens personal previews through Internal view or a Topics grant on self-hosted deployments", () => {
+it("opens personal previews through Internal view or a Topics or trace evals grant on self-hosted deployments", () => {
   const session = {
     expires: "2099-01-01",
     environment: {
@@ -14,12 +14,12 @@ it("opens personal previews through Internal view or a Topics grant on self-host
     user: {
       id: "user-1",
       email: "member@clickhouse.com",
-      admin: false,
       v4BetaEnabled: false,
       canCreateOrganizations: true,
       organizations: [],
       featureFlags: testFeatureFlags(),
     },
+    policies: [],
   };
   const input = {
     session,
@@ -36,7 +36,12 @@ it("opens personal previews through Internal view or a Topics grant on self-host
   expect(canOpenPersonalFeaturePreviews(input)).toBe(true);
 
   session.user.featureFlags.langfuseTopics = false;
-  session.user.admin = true;
+  expect(canOpenPersonalFeaturePreviews(input)).toBe(false);
+
+  session.user.featureFlags.traceTranscriptEvals = true;
+  expect(canOpenPersonalFeaturePreviews(input)).toBe(true);
+
+  session.user.featureFlags.traceTranscriptEvals = false;
   expect(canOpenPersonalFeaturePreviews(input)).toBe(false);
 
   session.user.v4BetaEnabled = true;

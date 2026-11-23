@@ -5,6 +5,8 @@ import {
   type TopicConfig,
 } from "@prisma/client";
 import { prisma } from "../../db";
+import { logger } from "../logger";
+import { getLLMErrorInfo } from "../llm/errors";
 import { InvalidRequestError } from "../../errors/InvalidRequestError";
 import {
   getClientInitiatedNonStreamingLlmTimeoutMs,
@@ -100,6 +102,7 @@ function resolveSlot(
     connection: {
       projectId: projectId ?? key.projectId ?? undefined,
       secretKey: key.secretKey,
+      externalId: key.externalId,
       extraHeaders: key.extraHeaders,
       baseURL: key.baseURL,
       config: key.config as LLMConnection["config"],
@@ -190,7 +193,7 @@ export async function getTopicsModels(
   return row ? ((await resolveConfigs([row]))[0] ?? null) : null;
 }
 
-/** Loads the enabled, fully configured projects of a trace batch in two queries. */
+/** Loads the enabled, fully configured projects of a dispatch batch in two queries. */
 export async function getEnabledTopicsModels(
   projectIds: string[],
 ): Promise<Map<string, TopicsModels>> {
@@ -424,6 +427,24 @@ export async function readTopicsModelSettings(projectId: string) {
   };
 }
 
+/**
+ * Whether summaries were embedded with the stored embedding model and
+ * dimensions, which locks both. Mirrors the check in `prepareTopicsModelSettings`.
+ */
+export async function hasCurrentTopicEmbeddings(
+  projectId: string,
+): Promise<boolean> {
+  const row = await prisma.topicConfig.findUnique({
+    where: { projectId },
+    select: { embeddingModel: true, embeddingDimensions: true },
+  });
+  if (!row?.embeddingModel) return false;
+  return hasTopicEmbeddings(projectId, {
+    embeddingModel: row.embeddingModel,
+    embeddingDimensions: row.embeddingDimensions,
+  });
+}
+
 /** Resolves each slot's provider to the project's effective connection, or throws. */
 async function resolveModelSettings(
   projectId: string,
@@ -460,7 +481,7 @@ export async function checkTopicsModelSettings(
   settings: TopicsModelSettings,
 ): Promise<Partial<Record<TopicsModelSlotName, string>>> {
   const resolved = await resolveModelSettings(projectId, settings);
-  return testTopicsModelSlots(resolved.settings, resolved.keys);
+  return testTopicsModelSlots(projectId, resolved.settings, resolved.keys);
 }
 
 /**
@@ -489,18 +510,23 @@ export async function prepareTopicsModelSettings(
     );
 
   const slots = resolveSavedSlots(resolved, current);
-  const embeddingChanged =
+  // Vectors of different models or sizes cannot be clustered together.
+  if (
     current?.embeddingModel &&
     (slots.embedding.model !== current.embeddingModel ||
-      slots.embeddingDimensions !== current.embeddingDimensions);
-  if (embeddingChanged && (await hasTopicEmbeddings(projectId)))
+      slots.embeddingDimensions !== current.embeddingDimensions) &&
+    (await hasTopicEmbeddings(projectId, {
+      embeddingModel: current.embeddingModel,
+      embeddingDimensions: current.embeddingDimensions,
+    }))
+  )
     throw new InvalidRequestError(
-      "The embedding model and dimensions cannot change after summaries were embedded; existing vectors could no longer be clustered together.",
+      `The embedding model and dimensions can't change once summaries are embedded: vectors from another model or size can't be grouped with the existing ones. Keep ${current.embeddingModel} at ${current.embeddingDimensions} dimensions; it can still move to another connection.`,
     );
 
   // Only changed models are tested: the dialog tests each pick, turning
   // processing on tests all three, and a broken stored connection pauses Topics.
-  await testTopicsModels(changedSlots(resolved, current), keys);
+  await testTopicsModels(projectId, changedSlots(resolved, current), keys);
 
   const data = {
     summaryLlmApiKeyId: slots.summary.llmApiKeyId,
@@ -606,7 +632,7 @@ export async function checkStoredTopicsModels(
   // Saved models were tested on save; a pause means a connection failed since.
   if (!config.blockedAt) return;
   const resolved = await resolveModelSettings(config.projectId, stored);
-  await testTopicsModels(resolved.settings, resolved.keys);
+  await testTopicsModels(config.projectId, resolved.settings, resolved.keys);
 }
 
 export async function writeTopicsModelSettings(
@@ -638,6 +664,7 @@ const TEST_SCHEMAS = {
  * length must match the configured dimensions. A slot with no error is omitted.
  */
 async function testTopicsModelSlots(
+  projectId: string,
   settings: ResolvedModelSettings,
   keys: LlmApiKeys[],
 ): Promise<Partial<Record<TopicsModelSlotName, string>>> {
@@ -654,7 +681,7 @@ async function testTopicsModelSlots(
         return;
       }
       try {
-        const resolved = resolveSlot(name, llmApiKey, slot.model);
+        const resolved = resolveSlot(name, llmApiKey, slot.model, projectId);
         if (!resolved) {
           errors[name] = "LLM connection not found in this project.";
           return;
@@ -699,17 +726,58 @@ async function testTopicsModelSlots(
           error instanceof Error
             ? error.message.slice(0, 300)
             : "The test call failed.";
+        const info = getLLMErrorInfo(error);
+        // Bedrock InvokeModel failures are plain errors that carry `status`.
+        const status =
+          info?.statusCode ?? (error as { status?: unknown } | null)?.status;
+        // Rate limits, timeouts and provider outages say nothing about the model.
+        const transient =
+          info?.kind === "timeout" ||
+          info?.kind === "abort" ||
+          status === 408 ||
+          status === 429 ||
+          (typeof status === "number" && status >= 500);
+        // The test prompt is static, so provider messages carry no customer content.
+        if (!transient)
+          logger.warn("Topics setup model test failed", {
+            projectId,
+            slot: name,
+            adapter: llmApiKey.adapter,
+            provider: llmApiKey.provider,
+            model: slot.model,
+            baseUrlHost:
+              llmApiKey.baseURL && URL.canParse(llmApiKey.baseURL)
+                ? new URL(llmApiKey.baseURL).hostname
+                : undefined,
+            status,
+            kind: info?.kind,
+            error: errors[name],
+            ...providerErrorCode(info?.providerError?.data),
+          });
       }
     }),
   );
   return errors;
 }
 
+/** OpenAI-style `error.code` and `error.param` only; free-text bodies can echo request details. */
+function providerErrorCode(data: unknown): { code?: string; param?: string } {
+  const error = (data as { error?: { code?: unknown; param?: unknown } } | null)
+    ?.error;
+  return {
+    ...(typeof error?.code === "string" && { code: error.code.slice(0, 64) }),
+    ...(typeof error?.param === "string" && {
+      param: error.param.slice(0, 64),
+    }),
+  };
+}
+
 async function testTopicsModels(
+  projectId: string,
   settings: ResolvedModelSettings,
   keys: LlmApiKeys[],
 ): Promise<void> {
-  const errors = await testTopicsModelSlots(settings, keys);
+  const errors = await testTopicsModelSlots(projectId, settings, keys);
   const failures = TOPICS_MODEL_SLOTS.flatMap((name) => {
     const message = errors[name];
     const slot = settings[name];
