@@ -1186,7 +1186,9 @@ jobs:
           pnpm --filter worker run test:native-codec
       - name: run tests
         id: worker-suite
-        run: pnpm --filter=worker run test:exclude-llm-connections
+        # placer-labs fork: 4-vCPU runners instead of upstream's 16, so tests
+        # that import heavy modules on first use can exceed vitest's 5s default.
+        run: pnpm --filter=worker run test:exclude-llm-connections --testTimeout=20000
         env:
           VITEST_CI_TIMINGS_PATH: ${{ runner.temp }}/vitest-worker.json
           LANGFUSE_CODE_EVAL_AWS_LAMBDA_ENDPOINT: ${{ matrix.deploy-mode == '' && 'http://localhost:4566' || '' }}
