@@ -173,7 +173,10 @@ export async function auditLog(
     isAuditLogEnabled() || env.PLACER_AUDIT_LOG_WRITES_ENABLED === "true";
   // Persisted records are also staged for ClickHouse. The worker relay that
   // drains the staging table runs under the same license condition.
-  const stageRecord = env.LANGFUSE_AUDIT_LOG_STAGING_ENABLED === "true";
+  // placer-labs fork: stage only when licensed, not for rows persisted by
+  // PLACER_AUDIT_LOG_WRITES_ENABLED, or the undrained staging table grows.
+  const stageRecord =
+    isAuditLogEnabled() && env.LANGFUSE_AUDIT_LOG_STAGING_ENABLED === "true";
 
   const db = prisma ?? _prisma;
   // Defer JSON.stringify(before/after) until we know the record will be
