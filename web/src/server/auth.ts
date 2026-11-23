@@ -81,7 +81,8 @@ import {
   verifyTurnstileToken,
 } from "@/src/features/auth/server/verifyTurnstile";
 import { z } from "zod";
-import { CloudConfigSchema, projectRoleAccessRights } from "@langfuse/shared";
+import { CloudConfigSchema } from "@langfuse/shared";
+import { OrganizationId, ProjectId } from "@langfuse/shared/rbac";
 import {
   CustomSSOProvider,
   GitHubEnterpriseProvider,
@@ -90,26 +91,27 @@ import {
   sendResetPasswordVerificationRequest,
   instrumentAsync,
   logger,
-  resolveProjectRole,
   isLangfuseAITracingConfigured,
   shouldSkipScoresDedup,
-} from "@langfuse/shared/src/server";
-import {
+  isForceV3ExperienceProject,
+  isTraceEvalsProjectEnabled,
   getOrganizationPlanServerSide,
   getSelfHostedInstancePlanServerSide,
-} from "@/src/features/entitlements/server/getPlan";
+} from "@langfuse/shared/src/server";
 import { getSSOBlockedDomains } from "@/src/features/auth-credentials/server/signupApiHandler";
 import {
   type EmailCodeRequest,
   normalizeEmailIdentifier,
 } from "@/src/features/auth-credentials/lib/credentialsServerUtils";
-import { createSupportEmailHash } from "@/src/features/support-chat/createSupportEmailHash";
 import {
   canToggleV4,
   isV4UpgradeUiAvailable,
 } from "@/src/features/events/lib/v4Rollout";
 import { canCreateOrganizations } from "@/src/features/organizations/server/canCreateOrganizations";
 import { isSignupOnboardingEnabled } from "@/src/features/onboarding/server/onboardingService";
+import { getPoliciesForUser } from "@/src/features/auth/policy/contextResolver";
+import { authorize } from "@/src/features/rbac/authorize";
+import { type Policy } from "@/src/features/rbac/types";
 
 const staticProviders: Provider[] = [
   CredentialsProvider({
@@ -877,61 +879,67 @@ export async function getAuthOptions(
       },
       async session({ session, token }): Promise<Session> {
         return instrumentAsync({ name: "next-auth-session" }, async (span) => {
-          const dbUser = await prisma.user.findUnique({
-            where: {
-              email: token.email!.toLowerCase(),
-              OR: [
-                { sessionsExpiredAt: null },
-                {
-                  // Strict: a token issued in the same millisecond as revocation
-                  // is treated as revoked.
-                  sessionsExpiredAt: {
-                    lt: new Date(token.loginAt ?? 0),
-                  },
+          // `sub` is the id of the user the token was issued for. Requiring it
+          // to match keeps a token from resolving to a later account that
+          // reuses the email, e.g. after the original account was deleted.
+          // A token without `sub` resolves to no user: Prisma would drop
+          // `id: undefined` from the filter and match on email alone.
+          const dbUser = !token.sub
+            ? null
+            : await prisma.user.findUnique({
+                where: {
+                  id: token.sub,
+                  email: token.email!.toLowerCase(),
+                  OR: [
+                    { sessionsExpiredAt: null },
+                    {
+                      // Strict: a token issued in the same millisecond as revocation
+                      // is treated as revoked.
+                      sessionsExpiredAt: {
+                        lt: new Date(token.loginAt ?? 0),
+                      },
+                    },
+                  ],
                 },
-              ],
-            },
-            select: {
-              id: true,
-              name: true,
-              email: true,
-              image: true,
-              emailVerified: true,
-              password: true,
-              createdAt: true,
-              featureFlags: true,
-              admin: true,
-              v4BetaEnabled: true,
-              supportAccess: true,
-              organizationMemberships: {
-                // Newest first so demo project is last for the `project/~/` sentinel
-                orderBy: {
-                  createdAt: "desc",
-                },
-                include: {
-                  organization: {
+                select: {
+                  id: true,
+                  name: true,
+                  email: true,
+                  image: true,
+                  password: true,
+                  createdAt: true,
+                  featureFlags: true,
+                  v4BetaEnabled: true,
+                  supportAccess: true,
+                  organizationMemberships: {
+                    // Newest first so demo project is last for the `project/~/` sentinel
+                    orderBy: {
+                      createdAt: "desc",
+                    },
                     include: {
-                      projects: {
-                        where: {
-                          deletedAt: {
-                            equals: null,
+                      organization: {
+                        include: {
+                          projects: {
+                            where: {
+                              deletedAt: {
+                                equals: null,
+                              },
+                            },
+                            orderBy: {
+                              createdAt: "desc",
+                            },
                           },
                         },
-                        orderBy: {
-                          createdAt: "desc",
+                      },
+                      ProjectMemberships: {
+                        include: {
+                          project: true,
                         },
                       },
                     },
                   },
-                  ProjectMemberships: {
-                    include: {
-                      project: true,
-                    },
-                  },
                 },
-              },
-            },
-          });
+              });
 
           span.setAttribute("langfuse.user.id", dbUser?.id ?? "");
           // Support engineers with an unexpired ConductorOne grant see the
@@ -977,9 +985,11 @@ export async function getAuthOptions(
             v4WriteMode,
             dualPreviewAvailable,
           });
+          const policies = await sessionPolicies(dbUser);
 
           return {
             ...session,
+            policies,
             environment: {
               enableExperimentalFeatures:
                 env.LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES === "true",
@@ -1005,34 +1015,26 @@ export async function getAuthOptions(
                     id: dbUser.id,
                     name: dbUser.name,
                     email: dbUser.email,
-                    emailSupportHash: dbUser.email
-                      ? createSupportEmailHash(dbUser.email)
-                      : undefined,
                     image: dbUser.image,
-                    admin: dbUser.admin,
                     v4BetaEnabled,
                     v4UpgradeUiAvailable,
                     canToggleV4:
                       v4WriteMode === "dual" && dualPreviewAvailable
                         ? isLangfuseCloud
-                          ? canToggleV4(
-                              {
-                                userCreatedAt: dbUser.createdAt,
-                                organizations:
-                                  dbUser.organizationMemberships.map(
-                                    (orgMembership) => ({
-                                      id: orgMembership.organization.id,
-                                      createdAt:
-                                        orgMembership.organization.createdAt,
-                                    }),
-                                  ),
-                                excludedOrganizationIds:
-                                  env.NEXT_PUBLIC_DEMO_ORG_ID
-                                    ? [env.NEXT_PUBLIC_DEMO_ORG_ID]
-                                    : [],
-                              },
-                              { isLangfuseCloudAdmin: dbUser.admin },
-                            )
+                          ? canToggleV4({
+                              userCreatedAt: dbUser.createdAt,
+                              organizations: dbUser.organizationMemberships.map(
+                                (orgMembership) => ({
+                                  id: orgMembership.organization.id,
+                                  createdAt:
+                                    orgMembership.organization.createdAt,
+                                }),
+                              ),
+                              excludedOrganizationIds:
+                                env.NEXT_PUBLIC_DEMO_ORG_ID
+                                  ? [env.NEXT_PUBLIC_DEMO_ORG_ID]
+                                  : [],
+                            })
                           : true
                         : false,
                     canCreateOrganizations: canCreateOrganizations(
@@ -1046,7 +1048,6 @@ export async function getAuthOptions(
                         return {
                           id: orgMembership.organization.id,
                           name: orgMembership.organization.name,
-                          role: orgMembership.role,
                           supportAccess: "supportAccess" in orgMembership,
                           metadata:
                             (orgMembership.organization.metadata as Record<
@@ -1071,23 +1072,32 @@ export async function getAuthOptions(
                           ),
                           cloudConfig: parsedCloudConfig.data,
                           projects: orgMembership.organization.projects
+                            // Only include projects the user can read
+                            .filter(
+                              (project) =>
+                                authorize(
+                                  { policies },
+                                  OrganizationId(orgMembership.organization.id),
+                                  "project:read",
+                                  ProjectId(project.id),
+                                ).success,
+                            )
                             .map((project) => {
-                              const projectRole = resolveProjectRole({
-                                projectId: project.id,
-                                projectMemberships:
-                                  orgMembership.ProjectMemberships,
-                                orgMembershipRole: orgMembership.role,
-                              });
                               return {
                                 id: project.id,
                                 name: project.name,
-                                role: projectRole,
                                 retentionDays: project.retentionDays,
                                 hasTraces: project.hasTraces,
                                 topicsEnabled: isTopicsProjectEnabled(
                                   project.id,
                                 ),
+                                traceEvalsEnabled: isTraceEvalsProjectEnabled(
+                                  project.id,
+                                ),
                                 scoreEditsDisabled: shouldSkipScoresDedup(
+                                  project.id,
+                                ),
+                                forceV3Experience: isForceV3ExperienceProject(
                                   project.id,
                                 ),
                                 deletedAt: project.deletedAt,
@@ -1098,13 +1108,7 @@ export async function getAuthOptions(
                                   >) ?? {},
                                 createdAt: project.createdAt.toISOString(),
                               };
-                            })
-                            // Only include projects where the user has the required role
-                            .filter((project) =>
-                              projectRoleAccessRights[project.role].includes(
-                                "project:read",
-                              ),
-                            ),
+                            }),
 
                           // Enables features/entitlements based on the plan of the organization, either cloud or EE version when self-hosting
                           // If you edit this line, you risk executing code that is not MIT licensed (contained in /ee folders, see LICENSE)
@@ -1114,7 +1118,6 @@ export async function getAuthOptions(
                         };
                       },
                     ),
-                    emailVerified: dbUser.emailVerified?.toISOString(),
                     featureFlags: parseFlags(dbUser.featureFlags, {
                       v4BetaEnabled,
                     }),
@@ -1403,3 +1406,11 @@ const sanitizeServerSessionCallbackUrl = (
     },
   );
 };
+
+/** sessionPolicies loads the signed-in user's policy set, and none for a token without a live user. */
+async function sessionPolicies(
+  user: { id: string } | null,
+): Promise<Policy[][]> {
+  if (!user) return [];
+  return [await getPoliciesForUser(prisma, user.id)];
+}

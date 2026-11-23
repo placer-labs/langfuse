@@ -184,6 +184,8 @@ So a single deployment can authenticate human users via SSO **and**
 automated processes via project API keys at the same time — there is no
 migration off API keys required to turn OIDC on.
 
+Tools that return trace, observation, score or experiment data declare `accessAudit` on `defineTool` and report the returned rows through the handler's `audit` argument (`audit.refs`, `audit.count`). Each successful call is then recorded as an access event (`surface = mcp`, the tool name as route) for orgs that record access events, before the result is returned.
+
 ---
 
 # Connecting Clients
