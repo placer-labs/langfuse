@@ -1,5 +1,7 @@
-import { auditLog } from "@/src/features/audit-logs/auditLog";
-import { type Role } from "@langfuse/shared/src/db";
+import {
+  auditLog,
+  type AuditLogActor,
+} from "@/src/features/audit-logs/auditLog";
 import { logger, redis } from "@langfuse/shared/src/server";
 
 /**
@@ -15,17 +17,13 @@ import { logger, redis } from "@langfuse/shared/src/server";
 // One row per (actor, trace) per 15 min — collapses double-fire and poll noise.
 const DEDUP_TTL_SECONDS = 15 * 60;
 
+type SessionActor = Extract<AuditLogActor, { session: unknown }>["session"];
+
 type RecordTraceViewAuditArgs = { resourceId: string } & (
   | {
-      session: {
-        user: { id: string };
-        orgId: string;
-        orgRole?: Role;
-        // Required: trace ids are unique per project, so projectId must scope
-        // the dedup key or a same-named trace in another project is dropped.
-        projectId: string;
-        projectRole?: Role;
-      };
+      // Required projectId: trace ids are unique per project, so it must scope
+      // the dedup key or a same-named trace in another project is dropped.
+      session: SessionActor & { projectId: string };
     }
   | { apiKeyId: string; orgId: string; projectId: string }
 );

@@ -1,5 +1,4 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { type Role } from "@langfuse/shared/src/db";
 
 const { auditLogMock, redisSetMock, redisDelMock, loggerMock } = vi.hoisted(
   () => ({
@@ -34,6 +33,13 @@ vi.mock("@langfuse/shared/src/server", () => ({
 }));
 
 import { recordTraceViewAudit } from "@/src/features/audit-logs/recordTraceViewAudit";
+import { createSession } from "@/src/__tests__/fixtures/session-factory";
+
+const uiSession = () => ({
+  ...createSession({ user: { id: "u1" } }),
+  orgId: "o1",
+  projectId: "p1",
+});
 
 describe("recordTraceViewAudit", () => {
   beforeEach(() => {
@@ -47,25 +53,11 @@ describe("recordTraceViewAudit", () => {
   });
 
   it("builds session-variant auditLog args for UI views", async () => {
-    await recordTraceViewAudit({
-      session: {
-        user: { id: "u1" },
-        orgId: "o1",
-        orgRole: "OWNER" as Role,
-        projectId: "p1",
-        projectRole: "MEMBER" as Role,
-      },
-      resourceId: "t1",
-    });
+    const session = uiSession();
+    await recordTraceViewAudit({ session, resourceId: "t1" });
 
     expect(auditLogMock).toHaveBeenCalledWith({
-      session: {
-        user: { id: "u1" },
-        orgId: "o1",
-        orgRole: "OWNER",
-        projectId: "p1",
-        projectRole: "MEMBER",
-      },
+      session,
       resourceId: "t1",
       resourceType: "trace",
       action: "read",
@@ -92,7 +84,7 @@ describe("recordTraceViewAudit", () => {
 
   it("dedups on a per-user, per-project key with NX + 15 min TTL for UI views", async () => {
     await recordTraceViewAudit({
-      session: { user: { id: "u1" }, orgId: "o1", projectId: "p1" },
+      session: uiSession(),
       resourceId: "t1",
     });
 
@@ -170,7 +162,7 @@ describe("recordTraceViewAudit", () => {
     auditLogMock.mockRejectedValue(new Error("postgres unavailable"));
 
     await recordTraceViewAudit({
-      session: { user: { id: "u1" }, orgId: "o1", projectId: "p1" },
+      session: uiSession(),
       resourceId: "t1",
     });
 
@@ -182,7 +174,7 @@ describe("recordTraceViewAudit", () => {
 
   it("does not clear the dedup key when the write succeeds", async () => {
     await recordTraceViewAudit({
-      session: { user: { id: "u1" }, orgId: "o1", projectId: "p1" },
+      session: uiSession(),
       resourceId: "t1",
     });
 
