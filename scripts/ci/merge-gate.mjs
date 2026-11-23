@@ -23,11 +23,24 @@ export const requiredJobs = [
   "e2e-server-tests",
 ];
 
-export function evaluateGate({ event, ref = "", needs, fork = false }) {
+// placer-labs fork: the AI gateway is not deployed here, so pipeline.yml runs
+// its jobs only in langfuse/langfuse and the gate accepts them as skipped.
+const upstreamOnlyJobs = ["tests-ai-gateway", "test-ai-gateway-e2e"];
+
+export function evaluateGate({
+  event,
+  ref = "",
+  needs,
+  fork = false,
+  repository = "langfuse/langfuse",
+}) {
   if (!needs || typeof needs !== "object" || Array.isArray(needs)) {
     return ["Missing job results"];
   }
   const allowedSkips = allowedFilteredSkips(event, ref, needs, fork);
+  if (repository !== "langfuse/langfuse") {
+    for (const job of upstreamOnlyJobs) allowedSkips.add(job);
+  }
   const duplicate = isDuplicatePush(event, needs);
   return [
     ...failedNeeds(needs),
@@ -123,6 +136,7 @@ if (isMainModule()) {
       ref: process.env.GITHUB_REF,
       needs: JSON.parse(process.env.NEEDS_JSON),
       fork: process.env.IS_FORK === "true",
+      repository: process.env.GITHUB_REPOSITORY,
     });
   } catch (error) {
     errors = [`Invalid job results: ${error.message}`];
