@@ -214,6 +214,11 @@ export const IN_APP_AGENT_LANGFUSE_MCP_TOOL_POLICIES = {
     approval: "auto",
     availability: { scope: "project:read" },
   },
+  // OIDC only, so never registered for in-app agent keys.
+  listProjects: {
+    approval: "auto",
+    availability: { scope: "project:read" },
+  },
   getMedia: {
     approval: "auto",
     availability: { scope: "project:read" },

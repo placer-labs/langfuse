@@ -31,6 +31,7 @@ import { externalMediaStorageFeature } from "@/src/ee/features/external-media-st
 import { monitorsFeature } from "./monitors";
 import { topicsFeature } from "./topics";
 import { v4MigrationFeature } from "./v4Migration";
+import { projectsFeature } from "./projects";
 
 const MCP_FEATURES = [
   promptsFeature,
@@ -54,6 +55,7 @@ const MCP_FEATURES = [
   monitorsFeature,
   topicsFeature,
   v4MigrationFeature,
+  projectsFeature,
 ] as const satisfies readonly McpFeatureModule[];
 
 type McpFeature = (typeof MCP_FEATURES)[number];
