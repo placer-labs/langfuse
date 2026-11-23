@@ -596,7 +596,7 @@ describe("MCP OIDC auth — user and project resolution", () => {
   it("denies a user with no accessible projects", async () => {
     await givenAssignments(
       assignments([
-        { orgRole: "NONE", projectRoles: { prj_a: "NONE" } },
+        { orgRole: "MEMBER", projectRoles: { prj_a: "NONE" } },
         { orgId: "org_2", orgRole: "AI_GATEWAY" },
       ]),
     );
@@ -611,7 +611,10 @@ describe("MCP OIDC auth — user and project resolution", () => {
   it("lists projects across orgs with the effective role", async () => {
     await givenAssignments(
       assignments([
-        { orgRole: "VIEWER", projectRoles: { prj_a: "ADMIN" } },
+        {
+          orgRole: "VIEWER",
+          projectRoles: { prj_a: "ADMIN", prj_hidden: "NONE" },
+        },
         { orgId: "org_2", orgRole: "MEMBER" },
         { orgId: "org_3", orgRole: "AI_GATEWAY" },
       ]),
@@ -619,6 +622,7 @@ describe("MCP OIDC auth — user and project resolution", () => {
     await givenProjects([
       { name: "b" },
       { name: "a" },
+      { name: "hidden" },
       { name: "c", orgId: "org_2" },
       { name: "gw", orgId: "org_3" },
     ]);
