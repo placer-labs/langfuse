@@ -37,6 +37,7 @@ import { isAuditLogEnabled } from "@/src/features/audit-logs/isAuditLogEnabled";
 import { canRecordAccessEvents } from "@/src/features/audit-logs/isAccessAuditLogEnabled";
 import { prisma } from "@langfuse/shared/src/db";
 import { createOrgProjectAndApiKey } from "@langfuse/shared/src/server";
+import { createSession } from "@/src/__tests__/fixtures/session-factory";
 
 /**
  * placer-labs runs Langfuse without an enterprise license. Upstream persists
@@ -61,7 +62,7 @@ describe("placer-labs audit log writes", () => {
       action: "read",
       resourceType: "trace",
       resourceId,
-      session: { user: { id: userId }, orgId, projectId },
+      session: { ...createSession({ user: { id: userId } }), orgId, projectId },
     });
     return prisma.auditLog.count({ where: { resourceId } });
   };

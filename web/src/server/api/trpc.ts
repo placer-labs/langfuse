@@ -682,48 +682,22 @@ const enforceTraceAccess = (readSource: "v3" | "v4") =>
     // avoid false positives.
     const isSingleTraceView = AUDITED_TRACE_VIEW_PROCEDURES.has(opts.path);
     if (isSingleTraceView && traceId && ctx.session?.user?.id) {
-      const userId = ctx.session.user.id;
       const memberOrg = ctx.session.user.organizations.find((org) =>
         org.projects.some((project) => project.id === projectId),
       );
       if (memberOrg) {
         // Fire-and-forget: recordTraceViewAudit never throws and we do not await
         // it, so the audit write cannot add latency to or fail the trace view.
+        // auditLog derives the actor's roles from the session's policies.
         recordTraceViewAudit({
           session: {
-            user: { id: userId },
+            ...ctx.session,
+            user: ctx.session.user,
             orgId: memberOrg.id,
-            orgRole: memberOrg.role,
             projectId,
-            projectRole: sessionProject?.role,
           },
           resourceId: traceId,
         });
-      } else if (ctx.session.user.admin === true) {
-        // Admins bypass membership but their org is not in the session — resolve
-        // it off the request path so the lookup adds no latency to the view.
-        ctx.prisma.project
-          .findFirst({
-            select: { orgId: true },
-            where: { id: projectId, deletedAt: null },
-          })
-          .then((project: { orgId: string } | null) => {
-            if (project) {
-              return recordTraceViewAudit({
-                session: {
-                  user: { id: userId },
-                  orgId: project.orgId,
-                  orgRole: Role.OWNER,
-                  projectId,
-                  projectRole: Role.OWNER,
-                },
-                resourceId: traceId,
-              });
-            }
-          })
-          .catch((e: unknown) =>
-            logger.error("Failed to record admin trace-view audit", e),
-          );
       }
     }
 
