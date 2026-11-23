@@ -24,6 +24,7 @@ import {
 import { env } from "@/src/env.mjs";
 import { logger } from "@langfuse/shared/src/server";
 import { type ServerContext } from "@/src/features/mcp/types";
+import { getAuditRequestContext } from "@/src/features/audit-logs/server/getAuditRequestContext";
 import { OIDC_API_KEY_ID_PREFIX } from "@/src/features/audit-logs/auditLog";
 import { getOrganizationPlanServerSide } from "@/src/features/entitlements/server/getPlan";
 import {
@@ -346,6 +347,7 @@ export async function resolveOidcContextFromRequest(
     rateLimitOverrides: principalOrg.rateLimitOverrides,
     accessAuditLogEnabled: organization.accessAuditLogEnabled,
     userAgent: req.headers["user-agent"],
+    auditRequest: getAuditRequestContext(req.headers, req.socket.remoteAddress),
     auth: userAuthorizationContext(user.id, role, principalOrg, projectId),
     authMethod: "oidc",
     projectDefaulted,
