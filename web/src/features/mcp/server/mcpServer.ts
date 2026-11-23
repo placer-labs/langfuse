@@ -132,8 +132,8 @@ export function createMcpServer(context: ServerContext): Server {
     if (context.authMethod === "oidc") {
       const { [PROJECT_ID_ARG]: requested, ...rest } = args ?? {};
       if (requested !== undefined && requested !== context.projectId) {
-        throw new McpError(
-          ErrorCode.InvalidParams,
+        throw new ProtocolError(
+          ProtocolErrorCode.InvalidParams,
           `${PROJECT_ID_ARG} must be set per tools/call request, not in a batch`,
         );
       }
