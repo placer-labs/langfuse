@@ -156,8 +156,8 @@ these out of access tokens by default and need a claim mapper.
 4. Pick the project: the tool call's `projectId` argument, else the
    X-Langfuse-Project-Id header, else the user's only project
    ↓
-5. Require access to that project: a project role, or else the user's
-   organization role
+5. Require project:read on that project under the user's role assignments,
+   the same policies the web UI authorizes with
    ↓
 6. Build ServerContext with the real userId; apiKeyId is
    synthesized as `oidc:<userId>` for audit-log compatibility
