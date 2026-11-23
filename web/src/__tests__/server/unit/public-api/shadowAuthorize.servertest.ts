@@ -111,7 +111,7 @@ describe("shadowAuthorize", () => {
             },
           ],
         },
-        policies: [allowPrompts],
+        policies: [[allowPrompts]],
       };
       const decision = shadowAuthorize({
         ...params("prompts:read", ctx),

@@ -4,8 +4,8 @@
  * These tests exercise the JWT verification + claim extraction logic in
  * isolation: they generate keys and sign tokens in-memory with `jose`, then
  * stub `createRemoteJWKSet` so the verifier resolves the local JWK without a
- * network round-trip. DB-backed user/membership resolution is covered by the
- * dispatcher integration test surface, not here.
+ * network round-trip. Role assignments are stubbed at the loader, so project
+ * access runs through upstream's real policy builder and authorize().
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -29,9 +29,14 @@ vi.mock("@/src/env.mjs", () => ({
 vi.mock("@langfuse/shared/src/db", () => ({
   prisma: {
     user: { findUnique: vi.fn() },
-    project: { findUnique: vi.fn() },
-    organizationMembership: { findUnique: vi.fn(), findMany: vi.fn() },
+    project: { findUnique: vi.fn(), findMany: vi.fn() },
+    organization: { findUnique: vi.fn() },
   },
+}));
+
+vi.mock("@langfuse/shared/rbac/server", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  getRoleAssignmentsForPrincipal: vi.fn(),
 }));
 
 // Stub out the heavyweight server module so importing the OIDC module under
@@ -39,6 +44,8 @@ vi.mock("@langfuse/shared/src/db", () => ({
 // teardown re-imports redis/logger/ClickHouseClientManager from this module,
 // so provide minimal no-op shapes for those.
 vi.mock("@langfuse/shared/src/server", () => ({
+  getOrganizationPlanServerSide: () => "oss",
+  getActiveTraceId: () => undefined,
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
   redis: { status: "end", disconnect: vi.fn() },
   ClickHouseClientManager: {
@@ -240,21 +247,51 @@ describe("MCP OIDC auth — user and project resolution", () => {
   const ORG_ID = "org_1";
   let keys: Keys;
 
-  const orgMembership = (
-    overrides: { orgRole?: string; projectRole?: string } = {},
-  ) => ({
-    orgId: ORG_ID,
-    role: overrides.orgRole ?? "VIEWER",
-    ProjectMemberships: overrides.projectRole
-      ? [{ role: overrides.projectRole }]
-      : [],
-    organization: {
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-      cloudConfig: null,
-      cloudFreeTierUsageThresholdState: null,
-      accessAuditLogEnabled: true,
-    },
-  });
+  type Assignment = { orgId: string; projectId: string | null; role: string };
+  // The user's role assignments: an org role, plus project roles by id.
+  const assignments = (
+    overrides: {
+      orgId?: string;
+      orgRole?: string;
+      projectRoles?: Record<string, string>;
+    }[] = [{}],
+  ): Assignment[] =>
+    overrides.flatMap(
+      ({ orgId = ORG_ID, orgRole = "VIEWER", projectRoles = {} }) => [
+        { orgId, projectId: null, role: orgRole },
+        ...Object.entries(projectRoles).map(([projectId, role]) => ({
+          orgId,
+          projectId,
+          role,
+        })),
+      ],
+    );
+  const givenAssignments = async (rows: Assignment[]) => {
+    const { getRoleAssignmentsForPrincipal } =
+      await import("@langfuse/shared/rbac/server");
+    vi.mocked(getRoleAssignmentsForPrincipal).mockResolvedValue(
+      rows.map(({ orgId, projectId, role }) => ({
+        orgId,
+        projectId,
+        systemRole: role,
+      })) as never,
+    );
+  };
+  const roles = (r: { orgRole?: string; projectRole?: string }) =>
+    assignments([
+      {
+        orgRole: r.orgRole,
+        projectRoles: r.projectRole ? { [PROJECT_ID]: r.projectRole } : {},
+      },
+    ]);
+
+  const organization = {
+    id: ORG_ID,
+    createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    cloudConfig: null,
+    cloudFreeTierUsageThresholdState: null as string | null,
+    accessAuditLogEnabled: true,
+  };
 
   // Shaped like an access token forwarded by an MCP gateway: no `aud`,
   // verified email, groups claim.
@@ -267,7 +304,7 @@ describe("MCP OIDC auth — user and project resolution", () => {
     });
 
   const request = (headers: Record<string, string>) =>
-    ({ headers }) as unknown as NextApiRequest;
+    ({ headers, socket: {} }) as unknown as NextApiRequest;
 
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -284,9 +321,10 @@ describe("MCP OIDC auth — user and project resolution", () => {
       orgId: ORG_ID,
       deletedAt: null,
     } as never);
-    vi.mocked(prisma.organizationMembership.findUnique).mockResolvedValue(
-      orgMembership() as never,
+    vi.mocked(prisma.organization.findUnique).mockResolvedValue(
+      organization as never,
     );
+    await givenAssignments(roles({}));
   });
 
   afterEach(() => {
@@ -344,11 +382,8 @@ describe("MCP OIDC auth — user and project resolution", () => {
       "denied",
     ],
     ["an AI_GATEWAY-only org role", { orgRole: "AI_GATEWAY" }, "denied"],
-  ] as const)("resolves access from %s", async (_label, roles, expected) => {
-    const { prisma } = await import("@langfuse/shared/src/db");
-    vi.mocked(prisma.organizationMembership.findUnique).mockResolvedValue(
-      orgMembership(roles) as never,
-    );
+  ] as const)("resolves access from %s", async (_label, r, expected) => {
+    await givenAssignments(roles(r));
     const { resolveOidcContextFromRequest } =
       await import("@/src/features/mcp/server/auth/oidc");
     const { shadowAuthorize } =
@@ -401,11 +436,10 @@ describe("MCP OIDC auth — user and project resolution", () => {
 
   it("rejects a usage-suspended organization", async () => {
     const { prisma } = await import("@langfuse/shared/src/db");
-    const blocked = orgMembership({ orgRole: "MEMBER" });
-    blocked.organization.cloudFreeTierUsageThresholdState = "BLOCKED" as never;
-    vi.mocked(prisma.organizationMembership.findUnique).mockResolvedValue(
-      blocked as never,
-    );
+    vi.mocked(prisma.organization.findUnique).mockResolvedValue({
+      ...organization,
+      cloudFreeTierUsageThresholdState: "BLOCKED",
+    } as never);
     const { resolveOidcContextFromRequest } =
       await import("@/src/features/mcp/server/auth/oidc");
     await expect(
@@ -417,9 +451,8 @@ describe("MCP OIDC auth — user and project resolution", () => {
   });
 
   it("rejects a user outside the project's organization", async () => {
-    const { prisma } = await import("@langfuse/shared/src/db");
-    vi.mocked(prisma.organizationMembership.findUnique).mockResolvedValue(
-      null as never,
+    await givenAssignments(
+      assignments([{ orgId: "org_other", orgRole: "OWNER" }]),
     );
     const { resolveOidcContextFromRequest } =
       await import("@/src/features/mcp/server/auth/oidc");
@@ -489,28 +522,24 @@ describe("MCP OIDC auth — user and project resolution", () => {
     },
   );
 
-  const memberships = (
-    orgs: {
-      orgId?: string;
-      role: string;
-      projects: string[];
-      projectRoles?: Record<string, string>;
-    }[],
-  ) =>
-    orgs.map(({ orgId = ORG_ID, role, projects, projectRoles = {} }) => ({
-      orgId,
-      role,
-      ProjectMemberships: Object.entries(projectRoles).map(
-        ([projectId, projectRole]) => ({ projectId, role: projectRole }),
-      ),
-      organization: {
-        projects: projects.map((name) => ({ id: `prj_${name}`, name })),
-      },
-    }));
+  // Projects in the user's orgs, as project.findMany returns them.
+  const givenProjects = async (
+    projects: { name: string; orgId?: string }[],
+  ) => {
+    const { prisma } = await import("@langfuse/shared/src/db");
+    vi.mocked(prisma.project.findMany).mockResolvedValue(
+      projects.map(({ name, orgId = ORG_ID }) => ({
+        id: `prj_${name}`,
+        name,
+        orgId,
+      })) as never,
+    );
+  };
 
   const toolCall = (args: Record<string, unknown>) =>
     ({
       headers: {},
+      socket: {},
       body: {
         jsonrpc: "2.0",
         id: 1,
@@ -523,6 +552,9 @@ describe("MCP OIDC auth — user and project resolution", () => {
     const { prisma } = await import("@langfuse/shared/src/db");
     const { resolveOidcContextFromRequest } =
       await import("@/src/features/mcp/server/auth/oidc");
+    await givenAssignments(
+      assignments([{ orgRole: "NONE", projectRoles: { prj_arg: "VIEWER" } }]),
+    );
     const req = toolCall({ projectId: "prj_arg" });
     req.headers["x-langfuse-project-id"] = PROJECT_ID;
     const context = await resolveOidcContextFromRequest(
@@ -548,9 +580,7 @@ describe("MCP OIDC auth — user and project resolution", () => {
     "defaults the project with %s",
     async (_label, [projects], expectedProject, defaulted) => {
       const { prisma } = await import("@langfuse/shared/src/db");
-      vi.mocked(prisma.organizationMembership.findMany).mockResolvedValue(
-        memberships([{ role: "VIEWER", projects: [...projects] }]) as never,
-      );
+      await givenProjects(projects.map((name) => ({ name })));
       const { resolveOidcContextFromRequest } =
         await import("@/src/features/mcp/server/auth/oidc");
       const context = await resolveOidcContextFromRequest(
@@ -564,13 +594,13 @@ describe("MCP OIDC auth — user and project resolution", () => {
   );
 
   it("denies a user with no accessible projects", async () => {
-    const { prisma } = await import("@langfuse/shared/src/db");
-    vi.mocked(prisma.organizationMembership.findMany).mockResolvedValue(
-      memberships([
-        { role: "MEMBER", projects: ["a"], projectRoles: { prj_a: "NONE" } },
-        { orgId: "org_2", role: "AI_GATEWAY", projects: ["b"] },
-      ]) as never,
+    await givenAssignments(
+      assignments([
+        { orgRole: "NONE", projectRoles: { prj_a: "NONE" } },
+        { orgId: "org_2", orgRole: "AI_GATEWAY" },
+      ]),
     );
+    await givenProjects([{ name: "a" }, { name: "b", orgId: "org_2" }]);
     const { resolveOidcContextFromRequest } =
       await import("@/src/features/mcp/server/auth/oidc");
     await expect(
@@ -579,17 +609,19 @@ describe("MCP OIDC auth — user and project resolution", () => {
   });
 
   it("lists projects across orgs with the effective role", async () => {
-    const { prisma } = await import("@langfuse/shared/src/db");
-    vi.mocked(prisma.organizationMembership.findMany).mockResolvedValue(
-      memberships([
-        {
-          role: "VIEWER",
-          projects: ["b", "a", "hidden"],
-          projectRoles: { prj_a: "ADMIN", prj_hidden: "NONE" },
-        },
-        { orgId: "org_2", role: "MEMBER", projects: ["c"] },
-      ]) as never,
+    await givenAssignments(
+      assignments([
+        { orgRole: "VIEWER", projectRoles: { prj_a: "ADMIN" } },
+        { orgId: "org_2", orgRole: "MEMBER" },
+        { orgId: "org_3", orgRole: "AI_GATEWAY" },
+      ]),
     );
+    await givenProjects([
+      { name: "b" },
+      { name: "a" },
+      { name: "c", orgId: "org_2" },
+      { name: "gw", orgId: "org_3" },
+    ]);
     const { listAccessibleProjects } =
       await import("@/src/features/mcp/server/auth/oidc");
     expect(await listAccessibleProjects("user_1")).toEqual([

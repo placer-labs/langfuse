@@ -1,7 +1,8 @@
 /**
  * OIDC bearer-token auth for the MCP endpoint: verifies the JWT against the
  * issuer's JWKS, maps its verified email to a Langfuse user, and authorizes
- * the requested project by the user's project or org role. The project comes
+ * the requested project by the user's role assignments, the same policies a
+ * web session carries. The project comes
  * from the tool call's `projectId` argument, then `X-Langfuse-Project-Id`,
  * then the user's first accessible project.
  */
@@ -13,24 +14,22 @@ import {
   CloudConfigSchema,
   ForbiddenError,
   UnauthorizedError,
-  type Role,
 } from "@langfuse/shared";
-import {
-  OrganizationId,
-  ProjectId,
-  SystemRoleId,
-  systemRoleAccessRights,
-} from "@langfuse/shared/rbac";
+import { OrganizationId, ProjectId } from "@langfuse/shared/rbac";
 import { env } from "@/src/env.mjs";
-import { logger } from "@langfuse/shared/src/server";
+import {
+  getOrganizationPlanServerSide,
+  logger,
+} from "@langfuse/shared/src/server";
 import { type ServerContext } from "@/src/features/mcp/types";
 import { getAuditRequestContext } from "@/src/features/audit-logs/server/getAuditRequestContext";
 import { OIDC_API_KEY_ID_PREFIX } from "@/src/features/audit-logs/auditLog";
-import { getOrganizationPlanServerSide } from "@/src/features/entitlements/server/getPlan";
-import {
-  type AuthorizationContext,
-  type PrincipalOrganization,
-} from "@/src/features/auth/policy/types";
+import { type PrincipalOrganization } from "@/src/features/auth/policy/types";
+import { getPoliciesForUser } from "@/src/features/auth/policy/contextResolver";
+import { authorize, rolesFor } from "@/src/features/rbac/authorize";
+import { type Policy } from "@/src/features/rbac/types";
+
+const ORG_PREFIX = "organization/";
 
 const PROJECT_ID_HEADER = "x-langfuse-project-id";
 export const PROJECT_ID_ARG = "projectId";
@@ -138,71 +137,63 @@ function extractVerifiedEmail(payload: JWTPayload): string {
 // probe which users exist.
 const OIDC_ACCESS_DENIED = "OIDC authentication failed";
 
-// Binds the user's role to the requested project only.
-function userAuthorizationContext(
-  userId: string,
-  role: Role,
-  org: PrincipalOrganization,
-  projectId: string,
-): AuthorizationContext {
-  const roleId = SystemRoleId(role);
-  const tenantId = OrganizationId(org.orgId);
-  return {
-    principal: { kind: "user", userId, organizations: [org] },
-    policies: systemRoleAccessRights[role].policies
-      .filter((policy) => policy.resourceKind === "project")
-      .map((policy) => ({
-        id: `${roleId}:${policy.resourceKind}`,
-        roleId,
-        tenantId,
-        effect: policy.effect,
-        actions: policy.actions,
-        resources: [ProjectId(projectId)],
-      })),
-  };
-}
-
 export type AccessibleProject = {
   id: string;
   name: string;
   orgId: string;
-  role: Role;
+  /** Effective role ids in the project, e.g. "MEMBER", comma-joined if several. */
+  role: string;
 };
+
+// The user's own role assignments, the same policy set web sessions use.
+async function userPolicies(userId: string): Promise<Policy[][]> {
+  return [await getPoliciesForUser(prisma, userId)];
+}
+
+function canReadProject(
+  policies: Policy[][],
+  orgId: string,
+  projectId: string,
+): boolean {
+  return authorize(
+    { policies },
+    OrganizationId(orgId),
+    "project:read",
+    ProjectId(projectId),
+  ).success;
+}
 
 export async function listAccessibleProjects(
   userId: string,
+  policies?: Policy[][],
 ): Promise<AccessibleProject[]> {
-  const memberships = await prisma.organizationMembership.findMany({
-    where: { userId },
-    select: {
-      orgId: true,
-      role: true,
-      ProjectMemberships: { select: { projectId: true, role: true } },
-      organization: {
-        select: {
-          projects: {
-            where: { deletedAt: null },
-            select: { id: true, name: true },
-          },
-        },
-      },
-    },
+  const sets = policies ?? (await userPolicies(userId));
+  const orgIds = [
+    ...new Set(
+      sets
+        .flat()
+        .map((policy) => policy.tenantId.slice(ORG_PREFIX.length))
+        .filter((orgId) => orgId !== "*"),
+    ),
+  ];
+  if (orgIds.length === 0) return [];
+  const projects = await prisma.project.findMany({
+    where: { orgId: { in: orgIds }, deletedAt: null },
+    select: { id: true, name: true, orgId: true },
   });
-  return memberships
-    .flatMap((membership) =>
-      membership.organization.projects.map((project) => ({
-        id: project.id,
-        name: project.name,
-        orgId: membership.orgId,
-        role:
-          membership.ProjectMemberships.find(
-            (pm) => pm.projectId === project.id,
-          )?.role ?? membership.role,
-      })),
-    )
-    .filter(
-      (project) => project.role !== "NONE" && project.role !== "AI_GATEWAY",
-    )
+  return projects
+    .filter((project) => canReadProject(sets, project.orgId, project.id))
+    .map((project) => ({
+      ...project,
+      role: rolesFor(
+        { policies: sets },
+        OrganizationId(project.orgId),
+        ProjectId(project.id),
+      )
+        .map((roleId) => roleId.replace(/^system\//, ""))
+        .sort()
+        .join(","),
+    }))
     .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
 }
 
@@ -252,10 +243,12 @@ export async function resolveOidcContextFromRequest(
     throw new ForbiddenError(OIDC_ACCESS_DENIED);
   }
 
+  const policies = await userPolicies(user.id);
+
   let project = requestedProject;
   let projectDefaulted = false;
   if (!projectId) {
-    const [first, ...rest] = await listAccessibleProjects(user.id);
+    const [first, ...rest] = await listAccessibleProjects(user.id, policies);
     if (!first) {
       logger.info("MCP OIDC auth: user has no accessible projects", {
         userId: user.id,
@@ -267,40 +260,23 @@ export async function resolveOidcContextFromRequest(
     projectDefaulted = rest.length > 0;
   }
 
-  // A project role overrides the org role, as in the web UI.
-  const orgMembership = project
-    ? await prisma.organizationMembership.findUnique({
-        where: { orgId_userId: { orgId: project.orgId, userId: user.id } },
-        select: {
-          orgId: true,
-          role: true,
-          ProjectMemberships: {
-            where: { projectId },
-            select: { role: true },
+  const organization =
+    project &&
+    project.deletedAt === null &&
+    canReadProject(policies, project.orgId, projectId)
+      ? await prisma.organization.findUnique({
+          where: { id: project.orgId },
+          select: {
+            id: true,
+            createdAt: true,
+            cloudConfig: true,
+            cloudFreeTierUsageThresholdState: true,
+            accessAuditLogEnabled: true,
           },
-          organization: {
-            select: {
-              createdAt: true,
-              cloudConfig: true,
-              cloudFreeTierUsageThresholdState: true,
-              accessAuditLogEnabled: true,
-            },
-          },
-        },
-      })
-    : null;
-  const role = orgMembership
-    ? (orgMembership.ProjectMemberships[0]?.role ?? orgMembership.role)
-    : undefined;
+        })
+      : null;
 
-  if (
-    !project ||
-    project.deletedAt !== null ||
-    !orgMembership ||
-    !role ||
-    role === "NONE" ||
-    role === "AI_GATEWAY"
-  ) {
+  if (!organization) {
     logger.info("MCP OIDC auth: user has no access to the requested project", {
       userId: user.id,
       projectId,
@@ -309,7 +285,7 @@ export async function resolveOidcContextFromRequest(
   }
 
   // Same usage-suspension gate as the BasicAuth path.
-  const { orgId, organization } = orgMembership;
+  const orgId = organization.id;
   if (organization.cloudFreeTierUsageThresholdState === "BLOCKED") {
     throw new ForbiddenError(
       "Access suspended: Usage threshold exceeded. Please upgrade your plan.",
@@ -333,7 +309,6 @@ export async function resolveOidcContextFromRequest(
     projectId,
     orgId,
     userId: user.id,
-    role,
   });
 
   return {
@@ -348,7 +323,15 @@ export async function resolveOidcContextFromRequest(
     accessAuditLogEnabled: organization.accessAuditLogEnabled,
     userAgent: req.headers["user-agent"],
     auditRequest: getAuditRequestContext(req.headers, req.socket.remoteAddress),
-    auth: userAuthorizationContext(user.id, role, principalOrg, projectId),
+    // The user's full policy set; MCP tools authorize against context.projectId.
+    auth: {
+      principal: {
+        kind: "user",
+        userId: user.id,
+        organizations: [principalOrg],
+      },
+      policies,
+    },
     authMethod: "oidc",
     projectDefaulted,
   };
