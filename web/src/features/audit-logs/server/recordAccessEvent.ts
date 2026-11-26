@@ -151,9 +151,7 @@ export function tracesRead(read: AccessRead): string[] {
 // trace an API key read as a recordTraceViewAudit row instead, without
 // blocking or failing the read.
 function shouldRecordPlacerTraceReads(): boolean {
-  return (
-    !isAuditLogEnabled() && env.PLACER_AUDIT_LOG_WRITES_ENABLED === "true"
-  );
+  return !isAuditLogEnabled() && env.PLACER_AUDIT_LOG_WRITES_ENABLED === "true";
 }
 
 function recordPlacerTraceReads(reader: ApiKeyReader, read: AccessRead): void {
@@ -161,16 +159,22 @@ function recordPlacerTraceReads(reader: ApiKeyReader, read: AccessRead): void {
   if (!projectId || read.outcome) return;
   const traceIds = tracesRead(read);
   if (traceIds.length === 0) return;
-  void (async () => {
-    for (const resourceId of traceIds) {
-      await recordTraceViewAudit({
-        apiKeyId: reader.apiKeyId,
-        orgId: reader.orgId,
-        projectId,
-        resourceId,
-      });
-    }
-  })();
+  recordTraceReadsInSequence(reader, projectId, traceIds);
+}
+
+async function recordTraceReadsInSequence(
+  reader: ApiKeyReader,
+  projectId: string,
+  traceIds: string[],
+): Promise<void> {
+  for (const resourceId of traceIds) {
+    await recordTraceViewAudit({
+      apiKeyId: reader.apiKeyId,
+      orgId: reader.orgId,
+      projectId,
+      resourceId,
+    });
+  }
 }
 
 async function recordApiKeyAccess(
