@@ -21,6 +21,9 @@ import {
 } from "@/src/features/audit-logs/isAccessAuditLogEnabled";
 import { getAuditRequestContext } from "@/src/features/audit-logs/server/getAuditRequestContext";
 import { toApiKeyActor, toUserActor } from "@/src/features/audit-logs/auditLog";
+import { isAuditLogEnabled } from "@/src/features/audit-logs/isAuditLogEnabled";
+import { recordTraceViewAudit } from "@/src/features/audit-logs/recordTraceViewAudit";
+import { env } from "@/src/env.mjs";
 import { type ServerContext } from "@/src/features/mcp/types";
 
 /** What a route returned: the resource it read, typed refs to every resource in the response, and the validated request input. */
@@ -128,12 +131,62 @@ async function toApiKeyReaderActor(reader: ApiKeyReader) {
   );
 }
 
+const TRACE_REF_PREFIX = "trace:";
+
+/** The traces a read returned: its requested trace and every trace ref. */
+export function tracesRead(read: AccessRead): string[] {
+  const ids = new Set<string>();
+  if (read.resourceType === "trace" && read.resourceId) {
+    ids.add(read.resourceId);
+  }
+  for (const ref of read.resourceRefs) {
+    if (ref.startsWith(TRACE_REF_PREFIX)) {
+      ids.add(ref.slice(TRACE_REF_PREFIX.length));
+    }
+  }
+  return [...ids];
+}
+
+// placer-labs fork: unlicensed, access events record nothing. Record each
+// trace an API key read as a recordTraceViewAudit row instead, without
+// blocking or failing the read.
+function shouldRecordPlacerTraceReads(): boolean {
+  return !isAuditLogEnabled() && env.PLACER_AUDIT_LOG_WRITES_ENABLED === "true";
+}
+
+function recordPlacerTraceReads(reader: ApiKeyReader, read: AccessRead): void {
+  const { projectId } = reader;
+  if (!projectId || read.outcome) return;
+  const traceIds = tracesRead(read);
+  if (traceIds.length === 0) return;
+  recordTraceReadsInSequence(reader, projectId, traceIds);
+}
+
+async function recordTraceReadsInSequence(
+  reader: ApiKeyReader,
+  projectId: string,
+  traceIds: string[],
+): Promise<void> {
+  for (const resourceId of traceIds) {
+    await recordTraceViewAudit({
+      apiKeyId: reader.apiKeyId,
+      orgId: reader.orgId,
+      projectId,
+      resourceId,
+    });
+  }
+}
+
 async function recordApiKeyAccess(
   reader: ApiKeyReader,
   surface: "public-api" | "mcp",
   request: () => AuditRequestContext | undefined,
   read: AccessRead | (() => AccessRead),
 ): Promise<void> {
+  if (shouldRecordPlacerTraceReads()) {
+    recordPlacerTraceReads(reader, typeof read === "function" ? read() : read);
+    return;
+  }
   if (!canRecordAccessEvents()) return;
   // Credentials without an org, such as the admin key, carry no opt-in.
   const auditOrg =
